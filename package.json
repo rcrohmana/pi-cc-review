@@ -1,0 +1,21 @@
+{
+  "name": "pi-cc-review",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "check:prod": "tsc --noEmit",
+    "check:test": "tsc --noEmit -p tsconfig.test.json",
+    "check": "npm run check:prod && npm run check:test"
+  },
+  "engines": { "node": ">=22.6.0" },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2"
+  }
+}
