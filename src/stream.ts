@@ -1,5 +1,12 @@
 import { ReviewError } from './types.ts';
 
+export interface StreamRunError {
+  result?: string;
+  errors: string[];
+  subtype?: string;
+  apiStatus?: string | number;
+}
+
 export interface Parsed {
   finalText: string;
   invokedAgents: string[];
@@ -9,6 +16,7 @@ export interface Parsed {
   observedModels: string[];
   coordinatorModelVerified: boolean;
   reviewerModels: Record<string, string[]>;
+  runError?: StreamRunError;
   usage?: unknown;
 }
 
@@ -34,7 +42,32 @@ export function extractAgentName(content: any) {
     ?? content.input?.name;
 }
 
-export function parseStream(stdout: string): Parsed {
+function stringErrors(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string')
+    : [];
+}
+
+function cloneParsed(parsed: Parsed): Parsed {
+  return {
+    ...parsed,
+    invokedAgents: [...parsed.invokedAgents],
+    malformed: [...parsed.malformed],
+    observedModels: [...parsed.observedModels],
+    reviewerModels: Object.fromEntries(
+      Object.entries(parsed.reviewerModels)
+        .map(([name, models]) => [name, [...models]]),
+    ),
+    ...(parsed.runError === undefined ? {} : {
+      runError: {
+        ...parsed.runError,
+        errors: [...parsed.runError.errors],
+      },
+    }),
+  };
+}
+
+export function createStreamCollector() {
   const parsed: Parsed = {
     finalText: '',
     invokedAgents: [],
@@ -52,15 +85,15 @@ export function parseStream(stdout: string): Parsed {
     }
   };
 
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim()) continue;
+  const ingest = (line: string) => {
+    if (!line.trim()) return;
     let event: any;
     try {
       event = JSON.parse(line);
       parsed.events++;
     } catch {
       if (parsed.malformed.length < 5) parsed.malformed.push(line.slice(0, 500));
-      continue;
+      return;
     }
 
     if (event.type === 'system' && event.subtype === 'init' && typeof event.model === 'string') {
@@ -68,7 +101,11 @@ export function parseStream(stdout: string): Parsed {
     }
     recordModel(event.model);
     recordModel(event.message?.model);
-    const parentId = event.parent_tool_use_id ?? event.parentToolUseId ?? event.message?.parent_tool_use_id ?? event.message?.parentToolUseId;
+
+    const parentId = event.parent_tool_use_id
+      ?? event.parentToolUseId
+      ?? event.message?.parent_tool_use_id
+      ?? event.message?.parentToolUseId;
     const reviewer = typeof parentId === 'string' ? agentCalls.get(parentId) : undefined;
     const reviewerModel = event.message?.model ?? event.model;
     if (reviewer && typeof reviewerModel === 'string') {
@@ -76,8 +113,24 @@ export function parseStream(stdout: string): Parsed {
       if (!models.includes(reviewerModel)) models.push(reviewerModel);
     }
 
-    if (event.type === 'result' && typeof event.result === 'string') {
-      parsed.finalText = event.result;
+    if (event.type === 'result') {
+      const failed = event.is_error === true
+        || (typeof event.subtype === 'string' && event.subtype.startsWith('error_'));
+      if (failed) {
+        parsed.runError = {
+          ...(typeof event.result === 'string' ? { result: event.result } : {}),
+          errors: stringErrors(event.errors),
+          ...(typeof event.subtype === 'string' ? { subtype: event.subtype } : {}),
+          ...(
+            typeof event.api_error_status === 'string'
+            || typeof event.api_error_status === 'number'
+              ? { apiStatus: event.api_error_status }
+              : {}
+          ),
+        };
+      } else if (typeof event.result === 'string') {
+        parsed.finalText = event.result;
+      }
     }
     if (event.usage) parsed.usage = event.usage;
 
@@ -87,14 +140,43 @@ export function parseStream(stdout: string): Parsed {
         if (typeof name === 'string' && !parsed.invokedAgents.includes(name)) {
           parsed.invokedAgents.push(name);
         }
-        if (typeof name === 'string' && typeof content.id === 'string') agentCalls.set(content.id, name);
+        if (typeof name === 'string' && typeof content.id === 'string') {
+          agentCalls.set(content.id, name);
+        }
       }
-      if (content.type === 'text' && !parsed.finalText && event.type === 'result') {
+      if (
+        content.type === 'text'
+        && !parsed.finalText
+        && event.type === 'result'
+        && parsed.runError === undefined
+      ) {
         parsed.finalText = content.text;
       }
     }
-  }
-  return parsed;
+  };
+
+  return {
+    ingest,
+    snapshot: () => cloneParsed(parsed),
+  };
+}
+
+export function parseStream(stdout: string): Parsed {
+  const collector = createStreamCollector();
+  for (const line of stdout.split(/\r?\n/)) collector.ingest(line);
+  return collector.snapshot();
+}
+
+export function streamFailureDiagnostic(parsed: Parsed): string {
+  if (!parsed.runError) return '';
+  const message = parsed.runError.result
+    || parsed.runError.errors.join('; ')
+    || parsed.runError.subtype
+    || '';
+  if (!message) return '';
+  return parsed.runError.apiStatus === undefined
+    ? message
+    : `API ${parsed.runError.apiStatus}: ${message}`;
 }
 
 export function reviewersMatchModel(parsed: Parsed, required: string[], expected: string) {

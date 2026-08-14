@@ -4,7 +4,13 @@ import { HELP, isContainedRelative, parseArgs, containedFile } from '../src/args
 import { COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from '../src/config.ts';
 import { win32 } from 'node:path';
 import { requiredAgents, buildAgents, buildClaudeArgs } from '../src/agents.ts';
-import { parseStream, reviewersMatchModel, validateRun } from '../src/stream.ts';
+import {
+  createStreamCollector,
+  parseStream,
+  reviewersMatchModel,
+  streamFailureDiagnostic,
+  validateRun,
+} from '../src/stream.ts';
 
 test('help and normal path do not create an invocation plan', () => {
   assert.equal(parseArgs('--help').help, true);
@@ -97,6 +103,70 @@ test('stream records runtime models and verifies the configured coordinator fami
     () => validateRun(parseStream('{"type":"result","result":"# Review"}'), [], { coordinator: 'fable' }),
     (error: any) => error?.code === 'COORDINATOR_MODEL_UNVERIFIED',
   );
+});
+
+test('incremental stream collection matches batch parsing', () => {
+  const lines = [
+    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
+    JSON.stringify({
+      type: 'assistant',
+      message: {
+        content: [{
+          type: 'tool_use',
+          id: 'requirements-call',
+          name: 'Agent',
+          input: { subagent_type: 'requirements-critic' },
+        }],
+      },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      parent_tool_use_id: 'requirements-call',
+      message: { model: 'claude-sonnet-5', content: [] },
+    }),
+    JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '# Review' }),
+  ];
+  const collector = createStreamCollector();
+  for (const line of lines) collector.ingest(line);
+
+  assert.deepEqual(collector.snapshot(), parseStream(lines.join('\n')));
+  assert.equal(collector.snapshot().finalText, '# Review');
+  assert.deepEqual(collector.snapshot().reviewerModels, {
+    'requirements-critic': ['claude-sonnet-5'],
+  });
+});
+
+test('structured Claude error results produce actionable diagnostics', () => {
+  const parsed = parseStream(JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    result: 'There is an issue with the selected model.',
+    errors: [],
+    api_error_status: 404,
+  }));
+
+  assert.equal(parsed.finalText, '');
+  assert.deepEqual(parsed.runError, {
+    result: 'There is an issue with the selected model.',
+    errors: [],
+    subtype: 'success',
+    apiStatus: 404,
+  });
+  assert.equal(
+    streamFailureDiagnostic(parsed),
+    'API 404: There is an issue with the selected model.',
+  );
+});
+
+test('ordinary assistant text cannot spoof a structured runtime error', () => {
+  const parsed = parseStream(JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'is_error: true model unavailable' }] },
+  }));
+
+  assert.equal(parsed.runError, undefined);
+  assert.equal(streamFailureDiagnostic(parsed), '');
 });
 
 test('stream validation accepts Agent agent/name aliases and ignores non-Agent spoofing', () => {
