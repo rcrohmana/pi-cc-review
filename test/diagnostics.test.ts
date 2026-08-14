@@ -63,3 +63,45 @@ test('nonzero process diagnostics are bounded, redacted, cleaned, and not inject
   assert.equal(sent.length, 0);
   assert.equal(cleaned, 1);
 });
+
+test('JSON-only Claude runtime failure is surfaced and redacted', async () => {
+  const notices: string[] = [];
+  const pi = {
+    exec: async (_command: string, args: string[]) => args[0] === '--version'
+      ? { code: 0, stdout: '2.1.222 (Claude Code)', stderr: '' }
+      : { code: 0, stdout: 'loggedIn: true', stderr: '' },
+    sendMessage: () => { throw new Error('must not inject a failed review'); },
+  };
+  const failure = JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    is_error: true,
+    errors: [],
+    result: 'Selected model unavailable. token=secret-token',
+    api_error_status: 404,
+  });
+  const handler = createCommandHandler(pi, {
+    bundle: async () => ({
+      directory: 'C:/tmp/bundle',
+      manifestPath: 'C:/tmp/bundle/manifest.md',
+      truncated: false,
+      bytes: 1,
+    }),
+    cleanup: async () => {},
+    run: async (_command: string, _args: string[], _cwd: string, _timeout: number, options: any) => {
+      options.onStdoutLine(failure);
+      return { code: 1, timedOut: false, durationMs: 1, stdout: '', stderr: '' };
+    },
+  } as any);
+
+  await handler('plan --raw', {
+    cwd: process.cwd(),
+    ui: { notify: (message: string) => notices.push(message) },
+    sessionManager: { buildContextEntries: () => entries },
+  });
+
+  const error = notices.at(-1) ?? '';
+  assert.match(error, /^\[PROCESS_FAILED\] Claude Code exited 1\./);
+  assert.match(error, /API 404: Selected model unavailable/);
+  assert.doesNotMatch(error, /secret-token/);
+});

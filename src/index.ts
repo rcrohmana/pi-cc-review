@@ -19,7 +19,7 @@ export type ReviewDelivery = 'session' | 'return';
 type RunOutcome = { result: ProcessResult; parsed: ReturnType<typeof validateRun> };
 type UiOutcome = { ok: true; value: RunOutcome } | { ok: false; error: unknown };
 type ExecutionOptions = ProcessRunOptions & { reducer?: ReturnType<typeof createProgressReducer> };
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HELP, parseArgs, validatedFile } from './args.ts';
 import { buildClaudeArgs, requiredAgents } from './agents.ts';
@@ -31,7 +31,13 @@ import { collectFolder } from './folder.ts';
 import { runProcess, type ProcessRunOptions, type ProcessResult } from './process.ts';
 import type { ReviewProgressView } from './ui.ts';
 import { errorText, formatDuration, redactDiagnostic, wrapReview } from './render.ts';
-import { parseStream, reviewersMatchModel, validateRun } from './stream.ts';
+import {
+  createStreamCollector,
+  parseStream,
+  reviewersMatchModel,
+  streamFailureDiagnostic,
+  validateRun,
+} from './stream.ts';
 import { createProgressReducer } from './progress.ts';
 import { createProgressView } from './ui.ts';
 import { createApprovalTool } from './approval-tool.ts';
@@ -111,6 +117,14 @@ async function readStopHookState(directory: string): Promise<{ fired: number; bl
     };
   } catch {
     return { fired: 0, blocks: 0 };
+  }
+}
+
+async function retainInjectedStream(path: string, stdout: string): Promise<void> {
+  try {
+    await access(path);
+  } catch {
+    await writeFile(path, stdout, { mode: 0o600 }).catch(() => {});
   }
 }
 
@@ -217,25 +231,50 @@ export function createCommandHandler(
 
       ctx.ui.notify(`Starting Claude Code ${mode} review (1× ${COORDINATOR_MODEL} + ${reviewers.length}× ${REVIEWER_MODEL}, ${REVIEW_EFFORT} effort)…`, 'info');
       const executeRunAndValidate = async (options: ExecutionOptions = {}): Promise<RunOutcome> => {
-        const result = await run('claude', buildClaudeArgs(bundle!.directory, ctx.cwd, reviewers, args!.deep), mode === 'repo' ? bundle!.directory : ctx.cwd, LIMITS.timeout, options);
-        if (result.timedOut) throw new ReviewError('PROCESS_TIMEOUT', 'Claude Code review timed out. Try --focus or a smaller --base range.');
+        const streamPath = join(bundle!.directory, 'stream.ndjson');
+        const collector = createStreamCollector();
+        const onStdoutLine = (line: string) => {
+          collector.ingest(line);
+          options.onStdoutLine?.(line);
+        };
+        const result = await run(
+          'claude',
+          buildClaudeArgs(bundle!.directory, ctx.cwd, reviewers, args!.deep),
+          mode === 'repo' ? bundle!.directory : ctx.cwd,
+          LIMITS.timeout,
+          { ...options, onStdoutLine, stdoutFile: streamPath },
+        );
+        if (args!.keepBundle) await retainInjectedStream(streamPath, result.stdout);
+
+        const streamed = collector.snapshot();
+        const parsed = streamed.events > 0 ? streamed : parseStream(result.stdout);
+
+        if (result.timedOut) {
+          throw new ReviewError(
+            'PROCESS_TIMEOUT',
+            'Claude Code review timed out. Try --focus or a smaller --base range.',
+          );
+        }
         if (result.code !== 0) {
-          const candidate = result.stderr || result.stdout.split(/\r?\n/).filter((line: string) => !line.trimStart().startsWith('{')).join('\n');
+          const nonJsonStdout = result.stdout
+            .split(/\r?\n/)
+            .filter((line: string) => !line.trimStart().startsWith('{'))
+            .join('\n');
+          const candidate = streamFailureDiagnostic(parsed)
+            || result.stderr
+            || nonJsonStdout;
           const detail = redactDiagnostic(candidate);
-          throw new ReviewError('PROCESS_FAILED', `Claude Code exited ${result.code}.${detail ? ` Details: ${detail}` : ''}`);
+          throw new ReviewError(
+            'PROCESS_FAILED',
+            `Claude Code exited ${result.code}.${detail ? ` Details: ${detail}` : ''}`,
+          );
         }
-        if (args!.keepBundle) {
-          await writeFile(join(bundle!.directory, 'stream.ndjson'), result.stdout).catch(() => {});
-        }
+
         ctx.ui.notify('Claude Code review completed; validating delegation…', 'info');
         options.reducer?.setPhase('validating');
         return {
           result,
-          parsed: validateRun(
-            parseStream(result.stdout),
-            reviewers,
-            { coordinator: COORDINATOR_MODEL },
-          ),
+          parsed: validateRun(parsed, reviewers, { coordinator: COORDINATOR_MODEL }),
         };
       };
       const useProgressUi = ctx.mode === 'tui' && ctx.hasUI === true && typeof ctx.ui.custom === 'function';

@@ -638,6 +638,69 @@ test('supplied file is byte-bounded and does not require an assistant artifact',
   }
 });
 
+test('keep-bundle retains fake JSON stream on nonzero exit', async () => {
+  const h = harness();
+  const dir = await mkdtemp(join(tmpdir(), 'cc-stream-process-fail-'));
+  const failure = JSON.stringify({
+    type: 'result',
+    subtype: 'error_during_execution',
+    is_error: true,
+    result: 'Runtime unavailable',
+  });
+  const handler = createCommandHandler(h.pi, {
+    bundle: async () => ({
+      directory: dir,
+      manifestPath: join(dir, 'manifest.md'),
+      truncated: false,
+      bytes: 100,
+    }),
+    cleanup: async () => {},
+    run: async () => ({
+      code: 1,
+      stdout: failure,
+      stderr: '',
+      timedOut: false,
+      durationMs: 1,
+    }),
+  } as any);
+
+  try {
+    await handler('plan --keep-bundle --raw', h.ctx);
+    assert.equal(await readFile(join(dir, 'stream.ndjson'), 'utf8'), failure);
+    assert.match(h.notifications.at(-1)?.message ?? '', /Runtime unavailable/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('incremental collector delivers the complete final review when stdout result is only a tail', async () => {
+  const h = harness();
+  const finalReview = `# Claude Code Review\n\n${'finding '.repeat(20_000)}`;
+  const stream = [
+    ...validPlanStream().split('\n').slice(0, -1),
+    JSON.stringify({ type: 'result', result: finalReview }),
+  ].join('\n');
+  const handler = createCommandHandler(h.pi, {
+    bundle: async () => fakeBundle(),
+    cleanup: async () => {},
+    run: async (_command: string, _args: string[], _cwd: string, _timeout: number, options: any) => {
+      for (const line of stream.split('\n')) options.onStdoutLine(line);
+      return {
+        code: 0,
+        stdout: stream.slice(-64 * 1024),
+        stderr: '',
+        timedOut: false,
+        durationMs: 1,
+      };
+    },
+  } as any);
+
+  await handler('plan --raw', h.ctx);
+
+  assert.equal(h.sent.length, 1);
+  assert.ok(h.sent[0].message.content.endsWith(finalReview));
+});
+
 test('keep-bundle writes stream.ndjson into the bundle on success', async () => {
   const h = harness();
   const dir = await mkdtemp(join(tmpdir(), 'cc-stream-ok-'));
