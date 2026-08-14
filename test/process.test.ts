@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runProcess } from '../src/process.ts';
@@ -25,6 +25,66 @@ test('stdout capture is bounded by bytes, including multibyte output', async () 
     await assert.rejects(
       runProcess(process.execPath, [fixture.path], process.cwd(), 5_000),
       (error: any) => error?.code === 'OUTPUT_TOO_LARGE',
+    );
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('disk-backed stdout can exceed the in-memory capture limit', async () => {
+  const fixture = await script("process.stdout.write('é'.repeat(600_000));");
+  const stdoutFile = join(fixture.directory, 'stream.ndjson');
+  try {
+    const result = await runProcess(
+      process.execPath,
+      [fixture.path],
+      process.cwd(),
+      5_000,
+      { stdoutFile },
+    );
+
+    assert.equal(result.code, 0);
+    assert.equal(Buffer.byteLength(await readFile(stdoutFile)), 1_200_000);
+    assert.ok(Buffer.byteLength(result.stdout) < 1_000_000);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('disk-backed stdout is flushed and line callbacks remain UTF-8 safe', async () => {
+  const fixture = await script("process.stdout.write(Buffer.from('{\\\"x\\\":\\\"é')); setTimeout(()=>process.stdout.write(Buffer.from('\\\"}\\nsecond\\n')), 5);");
+  const stdoutFile = join(fixture.directory, 'stream.ndjson');
+  const lines: string[] = [];
+  try {
+    const result = await runProcess(
+      process.execPath,
+      [fixture.path],
+      process.cwd(),
+      5_000,
+      { stdoutFile, onStdoutLine: line => lines.push(line) },
+    );
+
+    assert.equal(result.code, 0);
+    assert.equal(await readFile(stdoutFile, 'utf8'), '{"x":"é"}\nsecond\n');
+    assert.deepEqual(lines, ['{"x":"é"}', 'second']);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+test('stream capture failure is typed and does not report success', async () => {
+  const fixture = await script("setInterval(() => process.stdout.write('tick\\n'), 5);");
+  const stdoutFile = join(fixture.directory, 'missing-parent', 'stream.ndjson');
+  try {
+    await assert.rejects(
+      runProcess(
+        process.execPath,
+        [fixture.path],
+        process.cwd(),
+        5_000,
+        { stdoutFile },
+      ),
+      (error: any) => error?.code === 'STREAM_CAPTURE_FAILED',
     );
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });

@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { StringDecoder } from 'node:string_decoder';
 import { ReviewError } from './types.ts';
 
 const OUTPUT_LIMIT = 1_000_000;
+const DIAGNOSTIC_TAIL_LIMIT = 64 * 1024;
 
 export interface ProcessResult {
   code: number | null;
@@ -12,7 +15,11 @@ export interface ProcessResult {
   durationMs: number;
 }
 
-export interface ProcessRunOptions { signal?: AbortSignal; onStdoutLine?: (line: string) => void; }
+export interface ProcessRunOptions {
+  signal?: AbortSignal;
+  onStdoutLine?: (line: string) => void;
+  stdoutFile?: string;
+}
 export async function runProcess(
   command: string,
   args: string[],
@@ -31,8 +38,10 @@ export async function runProcess(
     });
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
+    const stdoutTail: Buffer[] = [];
     let stdoutBytes = 0;
     let stderrBytes = 0;
+    let stdoutTailBytes = 0;
     let settled = false;
     let terminating = false;
     let timer: NodeJS.Timeout | undefined;
@@ -47,6 +56,24 @@ export async function runProcess(
     };
 
     const text = (chunks: Buffer[]) => Buffer.concat(chunks).toString('utf8');
+    const appendTail = (value: Buffer) => {
+      stdoutTail.push(value);
+      stdoutTailBytes += value.length;
+      while (stdoutTailBytes > DIAGNOSTIC_TAIL_LIMIT && stdoutTail.length > 0) {
+        const overflow = stdoutTailBytes - DIAGNOSTIC_TAIL_LIMIT;
+        const first = stdoutTail[0];
+        if (first.length <= overflow) {
+          stdoutTail.shift();
+          stdoutTailBytes -= first.length;
+        } else {
+          stdoutTail[0] = first.subarray(overflow);
+          stdoutTailBytes -= overflow;
+        }
+      }
+    };
+    const capturedStdout = () => options.stdoutFile
+      ? text(stdoutTail)
+      : text(stdoutChunks);
     const settle = (value?: ProcessResult, error?: Error) => {
       if (settled) return;
       settled = true;
@@ -102,8 +129,31 @@ export async function runProcess(
       return currentBytes + value.length;
     };
 
+    let captureFailure: ReviewError | undefined;
+    const captureDone = options.stdoutFile
+      ? pipeline(
+          child.stdout,
+          createWriteStream(options.stdoutFile, { flags: 'w', mode: 0o600 }),
+        ).catch(error => {
+          const captureError = new ReviewError(
+            'STREAM_CAPTURE_FAILED',
+            `Could not capture Claude output: ${error instanceof Error ? error.message : 'unknown stream error'}`,
+          );
+          captureFailure = captureError;
+          if (!settled && !terminating) {
+            terminating = true;
+            void killTree().finally(() => settle(undefined, captureError));
+          }
+        })
+      : Promise.resolve();
+    const terminateAndFlush = async () => {
+      await killTree();
+      await captureDone;
+    };
+
     child.stdout.on('data', value => {
-      stdoutBytes = append(stdoutChunks, stdoutBytes, value);
+      if (options.stdoutFile) appendTail(value);
+      else stdoutBytes = append(stdoutChunks, stdoutBytes, value);
       emitLines(decoder.write(value));
     });
     child.stderr.on('data', value => {
@@ -118,29 +168,35 @@ export async function runProcess(
     child.on('close', code => {
       if (terminating) return;
       emitLines(decoder.end(), true);
-      settle({
-        code,
-        stdout: text(stdoutChunks),
-        stderr: text(stderrChunks),
-        timedOut: false,
-        durationMs: Date.now() - started,
+      void captureDone.then(() => {
+        if (terminating || settled || captureFailure) return;
+        settle({
+          code,
+          stdout: capturedStdout(),
+          stderr: text(stderrChunks),
+          timedOut: false,
+          durationMs: Date.now() - started,
+        });
       });
     });
 
     const abort = () => {
       if (settled || terminating) return;
       terminating = true;
-      void killTree().finally(() => settle(undefined, new ReviewError('PROCESS_CANCELLED', 'Claude Code review cancelled.')));
+      void terminateAndFlush().finally(() => settle(
+        undefined,
+        new ReviewError('PROCESS_CANCELLED', 'Claude Code review cancelled.'),
+      ));
     };
     options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) abort();
     timer = setTimeout(() => {
       if (settled || terminating) return;
       terminating = true;
-      void killTree().finally(() => {
+      void terminateAndFlush().finally(() => {
         settle({
           code: null,
-          stdout: text(stdoutChunks),
+          stdout: capturedStdout(),
           stderr: text(stderrChunks),
           timedOut: true,
           durationMs: Date.now() - started,
