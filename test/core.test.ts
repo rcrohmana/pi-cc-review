@@ -54,6 +54,12 @@ test('safe invocation is exact and read-only', () => {
   assert.ok(args.includes('Agent,Read,Grep,Glob'));
   assert.ok(args.includes('Edit,Write,Bash,NotebookEdit,WebFetch,WebSearch,mcp__*'));
   assert.equal(args.some(x => x.includes('bypass')), false);
+  const verboseIndex = args.indexOf('--verbose');
+  const outputFormatIndex = args.indexOf('--output-format');
+  assert.ok(verboseIndex >= 0);
+  assert.ok(outputFormatIndex >= 0);
+  assert.ok(verboseIndex < outputFormatIndex);
+  assert.equal(args[args.indexOf('--model') + 1], 'fable');
   const appendIndex = args.indexOf('--append-system-prompt');
   assert.ok(appendIndex >= 0, 'coordinator must receive an extension-controlled append instruction');
   const coordinatorInstruction = args[appendIndex + 1];
