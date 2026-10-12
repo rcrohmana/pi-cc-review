@@ -48,7 +48,14 @@ test('safe invocation is exact and read-only', () => {
   assert.deepEqual(requiredAgents('repo', true), ['correctness-reviewer', 'test-reviewer', 'security-reviewer']);
   const agents = requiredAgents('code', false);
   const args = buildClaudeArgs('C:/tmp/bundle', 'C:/repo', agents, false);
-  assert.deepEqual(args.slice(0, 4), ['-p', '--safe-mode', '--model', 'fable']);
+  assert.deepEqual(args.slice(0, 5), ['-p', '--setting-sources', '', '--model', 'fable']);
+  assert.ok(!args.includes('--safe-mode'));
+  const agentDefinitions = JSON.parse(args[args.indexOf('--agents') + 1]);
+  for (const definition of Object.values(agentDefinitions) as any[]) {
+    // Claude Code rejects object-valued mcpServers once --agents are actually loaded.
+    assert.ok(Array.isArray(definition.mcpServers), 'mcpServers must be an array');
+    assert.ok(Array.isArray(definition.skills), 'skills must be an array');
+  }
   assert.ok(args.includes('--max-turns') && args.includes('16'));
   assert.ok(args.includes('--agents'));
   assert.ok(args.includes('Agent,Read,Grep,Glob'));
@@ -177,8 +184,10 @@ test('ordinary assistant text cannot spoof a structured runtime error', () => {
 
 test('stream validation accepts Agent agent/name aliases and ignores non-Agent spoofing', () => {
   const parsed = parseStream([
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { agent: 'correctness-reviewer' } }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { name: 'test-reviewer' } }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'c1', name: 'Agent', input: { agent: 'correctness-reviewer' } }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't1', name: 'Agent', input: { name: 'test-reviewer' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'done' }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'done' }] } }),
     JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { name: 'spoof-reviewer' } }] } }),
     JSON.stringify({ type: 'result', result: '# Claude Code Review' }),
   ].join('\n'));
@@ -247,8 +256,45 @@ test('reviewerModels attributes per-reviewer via parent_tool_use_id and kills va
 test('real Agent events are required; prose is insufficient', () => {
   const prose = parseStream('{"type":"assistant","message":{"content":[{"type":"text","text":"I asked correctness-reviewer"}]}}\n{"type":"result","result":"# Review"}');
   assert.throws(() => validateRun(prose, ['correctness-reviewer']), /Observed native Agent calls: none.*stream\.ndjson/);
-  const valid = parseStream('{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","input":{"subagent_type":"correctness-reviewer"}}]}}\n{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","input":{"subagent_type":"test-reviewer"}}]}}\n{"type":"result","result":"# Review"}');
-  assert.deepEqual(validateRun(valid, ['correctness-reviewer', 'test-reviewer']).invokedAgents.sort(), ['correctness-reviewer','test-reviewer']);
+  const valid = parseStream('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"c1","name":"Agent","input":{"subagent_type":"correctness-reviewer"}}]}}\n{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"subagent_type":"test-reviewer"}}]}}\n{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"c1","content":"ok"},{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}\n{"type":"result","result":"# Review"}');
+  const validated = validateRun(valid, ['correctness-reviewer', 'test-reviewer']);
+  assert.deepEqual(validated.invokedAgents.sort(), ['correctness-reviewer','test-reviewer']);
+  assert.deepEqual(validated.completedAgents.sort(), ['correctness-reviewer','test-reviewer']);
+});
+
+test('invoked reviewers whose Agent call errored or never returned are rejected', () => {
+  const lines = (resultForTest: string) => [
+    JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
+    JSON.stringify({ type: 'assistant', message: { content: [
+      { type: 'tool_use', id: 'c1', name: 'Agent', input: { subagent_type: 'correctness-reviewer' } },
+      { type: 'tool_use', id: 't1', name: 'Agent', input: { subagent_type: 'test-reviewer' } },
+    ] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c1', content: 'review done' }] } }),
+    resultForTest,
+    JSON.stringify({ type: 'result', result: '# Claude Code Review (written without reviewers)' }),
+  ].filter(Boolean).join('\n');
+
+  const errored = parseStream(lines(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: [{ type: 'text', text: "Agent type 'test-reviewer' not found. Available agents: claude, Explore" }] }] } })));
+  assert.deepEqual(errored.completedAgents, ['correctness-reviewer']);
+  assert.throws(
+    () => validateRun(errored, ['correctness-reviewer', 'test-reviewer'], { coordinator: 'fable' }),
+    (error: any) => error?.code === 'REQUIRED_AGENTS_FAILED'
+      && /test-reviewer \(Agent type 'test-reviewer' not found/.test(error.message)
+      && !/correctness-reviewer/.test(error.message),
+  );
+
+  const unanswered = parseStream(lines(''));
+  assert.throws(
+    () => validateRun(unanswered, ['correctness-reviewer', 'test-reviewer'], { coordinator: 'fable' }),
+    (error: any) => error?.code === 'REQUIRED_AGENTS_FAILED' && /test-reviewer \(no successful result\)/.test(error.message),
+  );
+
+  const retried = parseStream([
+    lines(JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'transient' }] } })),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't2', name: 'Agent', input: { subagent_type: 'test-reviewer' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'review done' }] } }),
+  ].join('\n'));
+  assert.deepEqual(validateRun(retried, ['correctness-reviewer', 'test-reviewer'], { coordinator: 'fable' }).completedAgents, ['correctness-reviewer', 'test-reviewer']);
 });
 test('missing-reviewer error names observed reviewers and points at the retained stream', () => {
   const partial = parseStream('{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Agent","input":{"subagent_type":"correctness-reviewer"}}]}}\n{"type":"result","result":"# Review"}');

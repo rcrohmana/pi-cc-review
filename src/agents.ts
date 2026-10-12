@@ -52,7 +52,7 @@ export function buildAgents(names: string[]) {
     model: REVIEWER_MODEL,
     effort: REVIEW_EFFORT,
     hooks: {},
-    mcpServers: {},
+    mcpServers: [],
     skills: [],
   }]));
 }
@@ -77,7 +77,7 @@ export function buildClaudeArgs(
   const settings = { hooks: { Stop: [{ hooks: [{ type: 'command', command: stopCommand, timeout: 30 }] }] } };
   return [
     '-p',
-    '--safe-mode',
+    '--setting-sources', '',
     '--model', COORDINATOR_MODEL,
     '--effort', REVIEW_EFFORT,
     '--verbose',

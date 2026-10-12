@@ -11,12 +11,19 @@ const planEntries = [
   { message: { role: 'assistant', content: 'P'.repeat(400) } },
 ];
 
+function agentCall(name: string, id = `call-${name}`, isError = false) {
+  return [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Agent', input: { subagent_type: name } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: isError ? `Agent type '${name}' not found.` : 'review done' }] } }),
+  ];
+}
+
 function validPlanStream() {
   return [
     JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
     JSON.stringify({ type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'req', name: 'Agent', input: { subagent_type: 'requirements-critic' } }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'arch', name: 'Agent', input: { subagent_type: 'architecture-critic' } }] } }),
+    ...agentCall('requirements-critic', 'req'),
+    ...agentCall('architecture-critic', 'arch'),
     JSON.stringify({ type: 'assistant', parent_tool_use_id: 'req', message: { model: 'claude-sonnet-4-6', content: [] } }),
     JSON.stringify({ type: 'assistant', message: { parent_tool_use_id: 'arch', model: 'claude-sonnet-4-6', content: [] } }),
     JSON.stringify({ type: 'result', result: '# Claude Code Review\n\n**Verdict:** APPROVE' }),
@@ -204,6 +211,7 @@ test('raw review uses native fake Agent events and injects complete metadata wit
     mode: 'plan',
     requiredAgents: ['requirements-critic', 'architecture-critic'],
     invokedAgents: ['requirements-critic', 'architecture-critic'],
+    completedAgents: ['requirements-critic', 'architecture-critic'],
     validDelegation: true,
     claudeVersion: '2.1.212 (Claude Code)',
     coordinatorModel: 'fable',
@@ -220,7 +228,7 @@ test('raw review uses native fake Agent events and injects complete metadata wit
     stopHookFired: false,
     stopHookBlocks: 0,
   });
-  assert.ok(argv.includes('--safe-mode'));
+  assert.ok(!argv.includes('--safe-mode')); assert.equal(argv[argv.indexOf('--setting-sources') + 1], '');
   assert.ok(argv.includes('--agents'));
   assert.equal(cleanupCalls.length, 1);
 });
@@ -336,7 +344,7 @@ test('repo uses only bounded folder evidence and bundle cwd', async () => {
   const stream = (names: string[]) => [
     JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
     JSON.stringify({ type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [] } }),
-    ...names.map(subagent_type => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type } }] } })),
+    ...names.flatMap(name => agentCall(name)),
     JSON.stringify({ type: 'result', result: '# Claude Code Review' }),
   ].join('\n');
   const handler = createCommandHandler(h.pi, {
@@ -350,7 +358,7 @@ test('repo uses only bounded folder evidence and bundle cwd', async () => {
   assert.equal(gitCalls, 0); assert.equal(captured.mode, 'repo'); assert.equal(captured.artifact, '# snapshot'); assert.equal(runCwd, 'C:/tmp/repo-bundle'); assert.equal(cleanupCalls, 1);
   assert.deepEqual(h.sent[0]?.options, { triggerTurn: false, deliverAs: 'followUp' });
   assert.equal(h.sent[0]?.message.details.mode, 'repo'); assert.deepEqual(h.sent[0]?.message.details.requiredAgents, ['correctness-reviewer', 'test-reviewer']); assert.deepEqual(h.sent[0]?.message.details.invokedAgents, ['correctness-reviewer', 'test-reviewer']); assert.equal(h.sent[0]?.message.details.validDelegation, true); assert.equal(h.sent[0]?.message.details.coordinatorModel, 'fable'); assert.equal(h.sent[0]?.message.details.reviewerModel, 'sonnet'); assert.equal(h.sent[0]?.message.details.bundleRetained, false);
-  assert.ok(argv.includes('--safe-mode')); assert.ok(argv.includes('fable')); assert.ok(argv.includes('high')); assert.ok(argv.includes('Agent,Read,Grep,Glob')); assert.ok(argv.includes('Edit,Write,Bash,NotebookEdit,WebFetch,WebSearch,mcp__*'));
+  assert.ok(!argv.includes('--safe-mode')); assert.equal(argv[argv.indexOf('--setting-sources') + 1], ''); assert.ok(argv.includes('fable')); assert.ok(argv.includes('high')); assert.ok(argv.includes('Agent,Read,Grep,Glob')); assert.ok(argv.includes('Edit,Write,Bash,NotebookEdit,WebFetch,WebSearch,mcp__*'));
 });
 
 test('deep repo requires security reviewer and uses 18 turns', async () => {
@@ -358,7 +366,7 @@ test('deep repo requires security reviewer and uses 18 turns', async () => {
   const stream = [
     JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
     JSON.stringify({ type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [] } }),
-    ...['correctness-reviewer', 'test-reviewer', 'security-reviewer'].map(subagent_type => JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type } }] } })),
+    ...['correctness-reviewer', 'test-reviewer', 'security-reviewer'].flatMap(name => agentCall(name)),
     JSON.stringify({ type: 'result', result: '# Claude Code Review' }),
   ].join('\n');
   const handler = createCommandHandler(h.pi, { folder: async () => ({ artifact: 'snapshot', truncated: false }), bundle: async () => fakeBundle(), cleanup: async () => {}, run: async (_: string, args: string[]) => { argv = args; return { code: 0, stdout: stream, stderr: '', timedOut: false, durationMs: 1 }; } } as any);
@@ -619,8 +627,8 @@ test('supplied file is byte-bounded and does not require an assistant artifact',
       stdout: [
         JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
         JSON.stringify({ type: 'assistant', message: { model: 'claude-sonnet-4-6', content: [] } }),
-        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type: 'requirements-critic' } }] } }),
-        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type: 'implementation-feasibility-reviewer' } }] } }),
+        ...agentCall('requirements-critic'),
+        ...agentCall('implementation-feasibility-reviewer'),
         JSON.stringify({ type: 'result', result: '# Claude Code Review' }),
       ].join('\n'),
       stderr: '', timedOut: false, durationMs: 1,

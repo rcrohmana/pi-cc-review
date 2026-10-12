@@ -329,6 +329,7 @@ export function createCommandHandler(
         mode,
         requiredAgents: reviewers,
         invokedAgents: parsed.invokedAgents,
+        completedAgents: parsed.completedAgents,
         validDelegation: true,
         claudeVersion,
         coordinatorModel: COORDINATOR_MODEL,

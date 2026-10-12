@@ -27,13 +27,44 @@ export function collectInvokedAgents(transcript) {
   return invoked;
 }
 
+/** Agents whose native Agent/Task call returned a non-error tool_result. */
+export function collectCompletedAgents(transcript) {
+  const calls = new Map();
+  const completed = [];
+  const events = [];
+  for (const line of transcript.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try { events.push(JSON.parse(line)); } catch { /* skip malformed */ }
+  }
+  for (const event of events) {
+    for (const content of [event?.message?.content, event?.content]) {
+      if (!Array.isArray(content)) continue;
+      for (const item of content) {
+        const name = extractAgentName(item);
+        if (typeof name === 'string' && typeof item.id === 'string') calls.set(item.id, name);
+      }
+    }
+  }
+  for (const event of events) {
+    for (const content of [event?.message?.content, event?.content]) {
+      if (!Array.isArray(content)) continue;
+      for (const item of content) {
+        if (item?.type !== 'tool_result' || item.is_error === true) continue;
+        const name = calls.get(item.tool_use_id);
+        if (typeof name === 'string' && !completed.includes(name)) completed.push(name);
+      }
+    }
+  }
+  return completed;
+}
+
 export function computeMissing(required, invoked) {
   return required.filter(name => !invoked.includes(name));
 }
 
 export function buildBlockReason(missing) {
   const list = missing.join(', ');
-  return `Required native reviewers not yet invoked: ${list}. Invoke each missing reviewer now with a native Agent call using its exact subagent_type name (${list}), wait for their results, then produce the final review. Text-only simulation is invalid.`;
+  return `Required native reviewers not yet completed successfully: ${list}. Invoke each missing reviewer now with a native Agent call using its exact subagent_type name (${list}), wait for their results, then produce the final review. Text-only simulation is invalid.`;
 }
 
 export function readState(stateFile) {
@@ -73,7 +104,7 @@ function main() {
     transcript = readFileSync(payload?.transcript_path, 'utf8');
   } catch { return; }
 
-  const missing = computeMissing(required, collectInvokedAgents(transcript));
+  const missing = computeMissing(required, collectCompletedAgents(transcript));
   const state = readState(stateFile);
   state.fired += 1;
 

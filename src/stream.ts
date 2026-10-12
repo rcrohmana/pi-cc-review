@@ -10,6 +10,8 @@ export interface StreamRunError {
 export interface Parsed {
   finalText: string;
   invokedAgents: string[];
+  completedAgents: string[];
+  failedAgents: Record<string, string>;
   malformed: string[];
   events: number;
   initModel?: string;
@@ -48,10 +50,20 @@ function stringErrors(value: unknown): string[] {
     : [];
 }
 
+function toolResultText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value
+    .map(part => (typeof part === 'object' && part !== null && typeof (part as { text?: unknown }).text === 'string' ? (part as { text: string }).text : ''))
+    .join(' ');
+}
+
 function cloneParsed(parsed: Parsed): Parsed {
   return {
     ...parsed,
     invokedAgents: [...parsed.invokedAgents],
+    completedAgents: [...parsed.completedAgents],
+    failedAgents: { ...parsed.failedAgents },
     malformed: [...parsed.malformed],
     observedModels: [...parsed.observedModels],
     reviewerModels: Object.fromEntries(
@@ -71,6 +83,8 @@ export function createStreamCollector() {
   const parsed: Parsed = {
     finalText: '',
     invokedAgents: [],
+    completedAgents: [],
+    failedAgents: {},
     malformed: [],
     events: 0,
     observedModels: [],
@@ -142,6 +156,19 @@ export function createStreamCollector() {
         }
         if (typeof name === 'string' && typeof content.id === 'string') {
           agentCalls.set(content.id, name);
+        }
+      }
+      if (content.type === 'tool_result' && typeof content.tool_use_id === 'string') {
+        const name = agentCalls.get(content.tool_use_id);
+        if (name !== undefined) {
+          if (content.is_error === true) {
+            if (!parsed.completedAgents.includes(name)) {
+              parsed.failedAgents[name] = toolResultText(content.content).slice(0, 300);
+            }
+          } else if (!parsed.completedAgents.includes(name)) {
+            parsed.completedAgents.push(name);
+            delete parsed.failedAgents[name];
+          }
         }
       }
       if (
@@ -219,6 +246,16 @@ export function validateRun(
     throw new ReviewError(
       'REQUIRED_AGENTS_MISSING',
       `Required native reviewers missing: ${missing.join(', ')}. Observed native Agent calls: ${observed}. Re-run with --keep-bundle to retain the bundle and the raw stream (stream.ndjson).`,
+    );
+  }
+  const unsuccessful = required.filter(name => !parsed.completedAgents.includes(name));
+  if (unsuccessful.length) {
+    const details = unsuccessful
+      .map(name => parsed.failedAgents[name] ? `${name} (${parsed.failedAgents[name]})` : `${name} (no successful result)`)
+      .join('; ');
+    throw new ReviewError(
+      'REQUIRED_AGENTS_FAILED',
+      `Required native reviewers did not complete successfully: ${details}. Re-run with --keep-bundle to retain the bundle and the raw stream (stream.ndjson).`,
     );
   }
   return parsed;

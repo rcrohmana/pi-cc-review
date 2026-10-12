@@ -15,11 +15,18 @@ const planEntries = [
   { message: { role: 'assistant', content: 'P'.repeat(400) } },
 ];
 
+function agentCall(name: string, id = `call-${name}`, isError = false) {
+  return [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name: 'Agent', input: { subagent_type: name } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: isError, content: isError ? `Agent type '${name}' not found.` : 'review done' }] } }),
+  ];
+}
+
 function validPlanStream() {
   return [
     JSON.stringify({ type: 'system', subtype: 'init', model: 'claude-fable-5' }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'req', name: 'Agent', input: { subagent_type: 'requirements-critic' } }] } }),
-    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'arch', name: 'Agent', input: { subagent_type: 'architecture-critic' } }] } }),
+    ...agentCall('requirements-critic', 'req'),
+    ...agentCall('architecture-critic', 'arch'),
     JSON.stringify({ type: 'result', result: '# Claude Code Review\n\n**Verdict:** APPROVE' }),
   ].join('\n');
 }

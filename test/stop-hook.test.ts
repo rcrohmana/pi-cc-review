@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import {
   buildBlockReason,
+  collectCompletedAgents,
   collectInvokedAgents,
   computeMissing,
   extractAgentName,
@@ -15,11 +16,17 @@ import {
 
 const script = fileURLToPath(new URL('../hooks/stop-delegation-guard.mjs', import.meta.url));
 
-function agentLine(name: string, tool = 'Agent', key = 'subagent_type', topLevel = false) {
-  const item = { type: 'tool_use', name: tool, input: { [key]: name } };
-  return topLevel
-    ? JSON.stringify({ type: 'assistant', content: [item] })
-    : JSON.stringify({ type: 'assistant', message: { content: [item] } });
+let callSeq = 0;
+function agentLine(name: string, tool = 'Agent', key = 'subagent_type', topLevel = false, result: 'ok' | 'error' | 'none' = 'ok') {
+  const id = `call-${++callSeq}`;
+  const item = { type: 'tool_use', id, name: tool, input: { [key]: name } };
+  const resultItem = { type: 'tool_result', tool_use_id: id, is_error: result === 'error', content: result === 'error' ? `Agent type '${name}' not found.` : 'review done' };
+  const wrap = (content: unknown[], type: string) => topLevel
+    ? JSON.stringify({ type, content })
+    : JSON.stringify({ type, message: { content } });
+  const lines = [wrap([item], 'assistant')];
+  if (result !== 'none') lines.push(wrap([resultItem], 'user'));
+  return lines.join('\n');
 }
 
 function invoke(stateFile: string, transcriptPath: string, required: string, maxBlocks = '2', payload?: string) {
@@ -140,11 +147,37 @@ test('subagent_type precedence and Task alias are honoured end-to-end', async ()
   const s = await scratch();
   try {
     await writeFile(s.transcriptPath, [
-      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Agent', input: { subagent_type: 'alpha-reviewer', agent: 'ignored', name: 'ignored' } }] } }),
+      JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'alpha-call', name: 'Agent', input: { subagent_type: 'alpha-reviewer', agent: 'ignored', name: 'ignored' } }] } }),
+      JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'alpha-call', content: 'ok' }] } }),
       agentLine('beta-reviewer', 'Task'),
     ].join('\n'));
     const result = invoke(s.stateFile, s.transcriptPath, 'alpha-reviewer,beta-reviewer');
     assert.equal(result.status, 0);
     assert.equal(result.stdout, '');
+  } finally { await s.cleanup(); }
+});
+
+test('collectCompletedAgents counts only non-error Agent results', () => {
+  const transcript = [
+    agentLine('alpha-reviewer'),
+    agentLine('beta-reviewer', 'Agent', 'subagent_type', false, 'error'),
+    agentLine('gamma-reviewer', 'Agent', 'subagent_type', false, 'none'),
+  ].join('\n');
+  assert.deepEqual(collectInvokedAgents(transcript), ['alpha-reviewer', 'beta-reviewer', 'gamma-reviewer']);
+  assert.deepEqual(collectCompletedAgents(transcript), ['alpha-reviewer']);
+});
+
+test('a failed or unanswered Agent call still blocks stopping', async () => {
+  const s = await scratch();
+  try {
+    await writeFile(s.transcriptPath, [
+      agentLine('alpha-reviewer'),
+      agentLine('beta-reviewer', 'Agent', 'subagent_type', false, 'error'),
+    ].join('\n'));
+    const result = invoke(s.stateFile, s.transcriptPath, 'alpha-reviewer,beta-reviewer');
+    const decision = JSON.parse(result.stdout);
+    assert.equal(decision.decision, 'block');
+    assert.match(decision.reason, /beta-reviewer/);
+    assert.doesNotMatch(decision.reason, /alpha-reviewer/);
   } finally { await s.cleanup(); }
 });
