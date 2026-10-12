@@ -5,6 +5,7 @@ import {
   REVIEW_EFFORT,
   REVIEWER_MODEL,
 } from './config.ts';
+import { buildPermissionSettings, READ_ALLOW_RULE } from './permissions.ts';
 import type { EffectiveMode } from './types.ts';
 
 const PURPOSE: Record<string, string> = {
@@ -88,6 +89,7 @@ export function buildClaudeArgs(
   const recordCommand = `node "${hookScript}" --record "${outcomesFile}"`;
   const recordHook = [{ matcher: 'Agent|Task', hooks: [{ type: 'command', command: recordCommand, timeout: 30 }] }];
   const settings = {
+    permissions: buildPermissionSettings(),
     hooks: {
       PostToolUse: recordHook,
       PostToolUseFailure: recordHook,
@@ -108,7 +110,7 @@ export function buildClaudeArgs(
     '--strict-mcp-config',
     '--settings', JSON.stringify(settings),
     '--tools', 'Agent,Read,Grep,Glob',
-    '--allowedTools', 'Agent,Read,Grep,Glob',
+    '--allowedTools', `Agent,${READ_ALLOW_RULE}`,
     '--disallowedTools',
     'Edit,Write,Bash,NotebookEdit,WebFetch,WebSearch,mcp__*',
     '--permission-mode', 'dontAsk',

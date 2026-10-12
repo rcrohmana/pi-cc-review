@@ -1,9 +1,10 @@
 import { readdir, lstat, open, realpath } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
+import { isSecretFileName } from './permissions.ts';
 import { LIMITS, ReviewError } from './types.ts';
 const ignoredDirs = new Set(['.git','.hg','.svn','node_modules','vendor','dist','build','out','coverage','.next','.nuxt','target','bin','obj','.venv','venv','__pycache__']);
 const summaryReserve = 512;
-function excludedName(name: string) { return /^\.env(?:\.|$)|^\.npmrc$|^\.pypirc$|^\.netrc$|^credentials\.json$|\.(pem|key|p12|pfx|jks|keystore)$/i.test(name) || /^(id_rsa|id_ed25519|id_dsa|id_ecdsa)$/i.test(name) || /^(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml)$/i.test(name) || /\.min\.[^.]+$/i.test(name); }
+export function excludedName(name: string) { return isSecretFileName(name) || /^(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml)$/i.test(name) || /\.min\.[^.]+$/i.test(name); }
 async function boundedText(path: string) {
   const handle = await open(path, 'r');
   try {
