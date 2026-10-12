@@ -1,6 +1,6 @@
 # Pi `/cc-review`
 
-Global Pi extension providing one explicit, read-only Claude Code second-opinion command plus one confirmation-gated model-callable tool. It registers exactly `/cc-review` and `cc_review_approval`; no event handler, timer, watcher, or normal prompt can start Claude.
+Global Pi extension providing an explicit, read-only Claude Code second-opinion command, a confirmation-gated review tool, and an opt-in advisor. It registers exactly the commands `/cc-review` and `/cc-advisor`, the tools `cc_review_approval` and `cc_advise` (the latter inactive until the user grants it), and only `session_start`/`session_shutdown` handlers that revoke the advisor grant. No event handler, timer, watcher, or normal prompt can start Claude.
 
 ## Install / use
 
@@ -29,6 +29,16 @@ The complete Claude stream is written incrementally to the private temporary evi
 ## Advisor mode (`/cc-review advise`)
 
 `/cc-review advise [--focus "<question>"] [--raw] [--keep-bundle]` asks one Claude Code advisor for short guidance on the current task, in the spirit of Claude Code's advisor tool. It runs a single `claude -p` process on `fable` at `high` effort (`ADVISOR_*` constants in `src/config.ts`) with no reviewers or subagents, at most 8 turns, a 3-minute timeout, tools `Read,Grep,Glob` only, `Agent`/`Task` disallowed, and the same `--setting-sources ""`, scoped `Read(./**)`, and secret deny rules as reviews. The bundle contains the question, a bounded and redacted digest of the active Pi branch (messages, tool calls, and tool results; see `src/transcript.ts`), and `git status --short` plus `git diff --stat` when the folder is a Git repository. The advisor answers with `Verdict: proceed | revise | stop | decline` and short sections; a missing verdict is reported as `unknown`. Any Agent/Task use, an unverified model, a missing final answer, a timeout, or a runtime error fails closed and injects nothing. Guidance is delivered as `cc-advise-result` wrapped as external, untrusted advice; `--raw` suppresses the follow-up turn. Advise shares the single Claude lock with reviews. Redaction is pattern-based, so unusual secret formats in the session can still reach the advisor.
+
+## Model-initiated advisor (`/cc-advisor`)
+
+`/cc-advisor on [--max N]` lets the Pi model consult the advisor on its own through the `cc_advise` tool, up to N times in the current session (default 3, maximum 10). `/cc-advisor off` and `/cc-advisor status` turn it off and report the remaining budget. Each consultation is the same single read-only `fable` process as `/cc-review advise` and consumes Claude usage; Fable may bill to usage credits on some plans.
+
+- `cc_advise` is registered with `defaultActive: false`, so the model does not see it until the user types `/cc-advisor on`; only a user-typed slash command creates the grant. Execution re-checks the grant regardless of whether the tool is active.
+- The grant is in memory, bound to the session ID, and revoked with the tool deactivated on every `session_start` (startup, reload, new, resume, fork), on `session_shutdown`, on `/cc-advisor off`, and when the budget reaches zero.
+- At most one consultation per assistant message (identified from the issuing assistant entry), sequential execution, and the shared Claude lock: a busy lock is rejected before any budget is consumed. A started consultation consumes budget even if it fails, so retries cannot loop.
+- Parameters are strictly `question` (required) and `focus`, each 1–2,000 characters. Results are wrapped as external, untrusted advice with the verdict and remaining budget; errors return `[CODE] message` (`CC_ADVISOR_NOT_ENABLED`, `CC_ADVISOR_BUDGET_EXHAUSTED`, `CC_ADVISOR_RATE_LIMITED`, `CC_ADVISOR_INVALID_OPTIONS`, `ALREADY_RUNNING`, plus the advise-run codes).
+- Live check (2026-10-12, Pi RPC with only this extension, Pi model `claude-haiku-5-5`): `cc_advise` was not declared before the grant, `/cc-advisor on --max 1` activated it, the model called it once (advisor `claude-fable-5-1`, verdict `revise`, 30 s, issuing message identified), and the tool was removed from the declared set after the budget was used.
 
 ## Natural-language confirmation routing
 

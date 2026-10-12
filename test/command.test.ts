@@ -55,20 +55,21 @@ function fakeBundle(path = join(tmpdir(), 'cc-command-bundle')) {
   return { directory: path, manifestPath: join(path, 'manifest.md'), truncated: false, bytes: 100 };
 }
 
-test('extension registers exactly one approval tool and the explicit slash command', () => {
+test('extension registers the approval and advisor tools, two commands, and only session reset handlers', () => {
   const commands: Array<{ name: string; definition: any }> = [];
   const tools: any[] = [];
+  const events: string[] = [];
   extension({
     registerCommand: (name: string, definition: any) => commands.push({ name, definition }),
     registerTool: (definition: any) => tools.push(definition),
-    on: () => { throw new Error('must not register lifecycle handlers'); },
+    on: (event: string) => { events.push(event); },
   } as any);
-  assert.equal(commands.length, 1);
-  assert.equal(tools.length, 1);
-  assert.equal(commands[0].name, 'cc-review');
-  assert.equal(tools[0].name, 'cc_review_approval');
-  assert.equal(typeof commands[0].definition.handler, 'function');
-  assert.equal(typeof tools[0].execute, 'function');
+  assert.deepEqual(commands.map(command => command.name), ['cc-advisor', 'cc-review']);
+  assert.deepEqual(tools.map(tool => tool.name), ['cc_review_approval', 'cc_advise']);
+  assert.deepEqual(events.sort(), ['session_shutdown', 'session_start']);
+  assert.equal(tools[1].defaultActive, false, 'cc_advise must not be declared to the model until granted');
+  for (const command of commands) assert.equal(typeof command.definition.handler, 'function');
+  for (const tool of tools) assert.equal(typeof tool.execute, 'function');
 });
 
 test('registered approval tool runs the shared TUI workflow and returns the actual report', async () => {
@@ -122,7 +123,7 @@ test('registered approval tool runs the shared TUI workflow and returns the actu
   branch.push({ id: 'approved', type: 'message', message: { role: 'user', content: 'yes' } });
   const completed = await tool.execute('execute', { phase: 'execute', requestId: requested.details.requestId }, undefined, undefined, toolContext);
 
-  assert.equal(commands.length, 1);
+  assert.equal(commands.length, 2);
   assert.equal(customCalls, 1);
   assert.equal(runCalls, 1);
   assert.equal(cleanupCalls, 1);
@@ -137,8 +138,8 @@ test('registered approval tool runs the shared TUI workflow and returns the actu
 
 test('approval modules have no process/lifecycle access and index owns registration', async () => {
   const indexSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
-  assert.equal((indexSource.match(/pi\.registerTool\(/g) ?? []).length, 1);
-  assert.equal((indexSource.match(/pi\.registerCommand\(/g) ?? []).length, 1);
+  assert.equal((indexSource.match(/pi\.registerTool\(/g) ?? []).length, 2);
+  assert.equal((indexSource.match(/pi\.registerCommand\(/g) ?? []).length, 2);
   const files = ['approval-types.ts', 'approval-schema.ts', 'approval-canonical.ts', 'approval-state.ts', 'approval-tool.ts'];
   const sources = await Promise.all(files.map(file => readFile(new URL(`../src/${file}`, import.meta.url), 'utf8')));
   const approvalSource = sources.join('\n');

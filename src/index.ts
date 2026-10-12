@@ -5,7 +5,10 @@ type CommandDefinition = { description: string; getArgumentCompletions(prefix: s
 export type CommandPiApi = { exec(command: string, args: string[], options: { cwd: string; timeout: number }): Promise<ExecResult>; sendMessage(message: unknown, options: unknown): void };
 type ExtensionAPI = CommandPiApi & {
   registerCommand: (name: string, definition: CommandDefinition) => void;
-  registerTool: (definition: ApprovalToolDefinition) => void;
+  registerTool: (definition: ApprovalToolDefinition | ReturnType<typeof createAdvisorTool>) => void;
+  on?: (event: 'session_start' | 'session_shutdown', handler: (event: unknown, ctx: unknown) => unknown) => unknown;
+  getActiveTools?: () => string[];
+  setActiveTools?: (names: string[]) => void;
 };
 type UiLike = { notify(message: string, type?: 'info'|'warning'|'error'): void; custom?: <T>(factory: (tui: TuiLike, theme: ThemeLike, keys: unknown, done: (result: T) => void) => unknown) => Promise<T> };
 export type CommandContext = { cwd: string; mode?: string; hasUI?: boolean; signal?: AbortSignal; ui: UiLike; sessionManager: { buildContextEntries(): unknown[] } };
@@ -26,6 +29,8 @@ import { buildClaudeArgs, CLAUDE_ENV, requiredAgents } from './agents.ts';
 import { cleanupBundle, createBundle } from './bundle.ts';
 import { ADVISOR_EFFORT, ADVISOR_MODEL, COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
 import { createAdviseRunner, DEFAULT_ADVISOR_QUESTION, type AdviceResult } from './advise.ts';
+import { createAdvisorState } from './advisor-state.ts';
+import { ADVISOR_TOOL_NAME, createAdvisorCommand, createAdvisorTool, type AdvisorActivation } from './advisor-tool.ts';
 import { buildContextEntries, truncateUtf8 } from './context.ts';
 import { collectGit, collectGitSummary } from './git.ts';
 import { collectFolder } from './folder.ts';
@@ -415,6 +420,34 @@ export function registerExtension(pi: ExtensionAPI, overrides: Deps = {}): void 
       return result;
     },
   }));
+  const advisorState = createAdvisorState();
+  const activation: AdvisorActivation = {
+    activate: () => {
+      const active = pi.getActiveTools?.() ?? [];
+      if (!active.includes(ADVISOR_TOOL_NAME)) pi.setActiveTools?.([...active, ADVISOR_TOOL_NAME]);
+    },
+    deactivate: () => {
+      const active = pi.getActiveTools?.() ?? [];
+      if (active.includes(ADVISOR_TOOL_NAME)) pi.setActiveTools?.(active.filter(name => name !== ADVISOR_TOOL_NAME));
+    },
+  };
+  const adviseRunner = createAdviseRunner(pi, {
+    ...(overrides.run === undefined ? {} : { run: overrides.run }),
+    ...(overrides.cleanup === undefined ? {} : { cleanup: overrides.cleanup }),
+    ...(overrides.gitSummary === undefined ? {} : { gitSummary: overrides.gitSummary }),
+  });
+  pi.registerTool(createAdvisorTool({ state: advisorState, runAdvice: adviseRunner, activation }));
+  // The grant never survives a session boundary: startup, reload, new, resume, fork, or shutdown.
+  const resetAdvisor = () => { advisorState.revoke(); activation.deactivate(); };
+  pi.on?.('session_start', resetAdvisor);
+  pi.on?.('session_shutdown', () => { advisorState.revoke(); });
+  pi.registerCommand('cc-advisor', {
+    description: 'Let the model consult a Claude Code advisor within a session budget (on [--max N] | off | status)',
+    getArgumentCompletions: (prefix: string) => ['on', 'off', 'status', '--max', '--help']
+      .filter(value => value.startsWith(prefix))
+      .map(value => ({ value, label: value })),
+    handler: async (input, ctx) => { await createAdvisorCommand({ state: advisorState, activation })(input, ctx as any); },
+  });
   const completions = [
     'auto',
     'plan',
