@@ -243,3 +243,15 @@ test('cc_advise carries its consultation guidelines (system prompt only while ac
   assert.match(text, /stop verdict means pause and consult the user/);
   assert.match(text, /not a substitute for a full review/);
 });
+
+test('cc_advise emits one transient Advising… partial update before the consultation', async () => {
+  const h = setup();
+  await h.advisor('on --max 2');
+  const updates: any[] = [];
+  const result = await h.tool.execute('c1', { question: 'q' }, undefined, (update: any) => updates.push(update), h.toolCtx());
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].details, { kind: 'cc-advise', phase: 'advising', remaining: 1, total: 2 });
+  assert.equal(result.details.phase, undefined, 'final result is not marked as advising');
+  await assert.rejects(() => h.tool.execute('c2', { question: '' }, undefined, (update: any) => updates.push(update), h.toolCtx()));
+  assert.equal(updates.length, 1, 'no update when the call is rejected before reservation');
+});

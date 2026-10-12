@@ -7,6 +7,7 @@ type ExtensionAPI = CommandPiApi & {
   registerCommand: (name: string, definition: CommandDefinition) => void;
   registerTool: (definition: ApprovalToolDefinition | ReturnType<typeof createAdvisorTool>) => void;
   on?: (event: 'session_start' | 'session_shutdown', handler: (event: unknown, ctx: unknown) => unknown) => unknown;
+  registerMessageRenderer?: (customType: string, renderer: (message: any, options: any, theme: any) => unknown) => void;
   getActiveTools?: () => string[];
   setActiveTools?: (names: string[]) => void;
 };
@@ -30,6 +31,7 @@ import { cleanupBundle, createBundle } from './bundle.ts';
 import { ADVISOR_EFFORT, ADVISOR_MODEL, COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
 import { createAdviseRunner, DEFAULT_ADVISOR_QUESTION, type AdviceResult } from './advise.ts';
 import { createAdvisorState } from './advisor-state.ts';
+import { renderAdviceMessage } from './advisor-render.ts';
 import { ADVISOR_TOOL_NAME, createAdvisorCommand, createAdvisorTool, type AdvisorActivation } from './advisor-tool.ts';
 import { buildContextEntries, truncateUtf8 } from './context.ts';
 import { collectGit, collectGitSummary } from './git.ts';
@@ -437,6 +439,7 @@ export function registerExtension(pi: ExtensionAPI, overrides: Deps = {}): void 
     ...(overrides.gitSummary === undefined ? {} : { gitSummary: overrides.gitSummary }),
   });
   pi.registerTool(createAdvisorTool({ state: advisorState, runAdvice: adviseRunner, activation }));
+  pi.registerMessageRenderer?.('cc-advise-result', (message, options, theme) => renderAdviceMessage(message, options, theme));
   // The grant never survives a session boundary: startup, reload, new, resume, fork, or shutdown.
   const resetAdvisor = () => { advisorState.revoke(); activation.deactivate(); };
   pi.on?.('session_start', resetAdvisor);

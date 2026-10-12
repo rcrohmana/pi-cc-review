@@ -1,5 +1,6 @@
 import type { AdviceResult, AdviseContext, AdviseRequest, AdviseRunOptions } from './advise.ts';
 import { parseBudget, type AdvisorState } from './advisor-state.ts';
+import { renderAdvisorCall, renderAdvisorResult } from './advisor-render.ts';
 import { ADVISOR_EFFORT, ADVISOR_MAX_BUDGET, ADVISOR_MODEL } from './config.ts';
 import { errorText } from './render.ts';
 import { isLocked } from './runtime.ts';
@@ -86,7 +87,7 @@ export function createAdvisorTool(options: {
   runAdvice: AdviseRunnerFn;
   activation: AdvisorActivation;
 }) {
-  const consult = async (toolCallId: string, rawParams: unknown, signal: AbortSignal | undefined, ctx: AdvisorToolContext) => {
+  const consult = async (toolCallId: string, rawParams: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: AdvisorToolContext) => {
     const params = validateAdvisorParams(rawParams);
     const sessionId = ctx.sessionManager.getSessionId();
     const messageKey = findIssuingMessage(ctx.sessionManager.getBranch?.(), toolCallId);
@@ -97,6 +98,12 @@ export function createAdvisorTool(options: {
     }
     const reservation = options.state.reserve(sessionId, messageKey);
     try {
+      // Transient partial result: drives the live "Advising…" row in the TUI; never persisted.
+      if (typeof onUpdate === 'function') {
+        try {
+          onUpdate({ content: [{ type: 'text', text: 'Advising…' }], details: { kind: 'cc-advise', phase: 'advising', remaining: reservation.remaining, total: reservation.total } });
+        } catch { /* rendering hint only */ }
+      }
       const advice = await options.runAdvice(
         { question: params.question, ...(params.focus === undefined ? {} : { focus: params.focus }) },
         ctx,
@@ -135,10 +142,12 @@ export function createAdvisorTool(options: {
     defaultActive: false,
     executionMode: 'sequential' as const,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    renderCall: (args: unknown, theme: any, context: any) => renderAdvisorCall(args, theme, context),
+    renderResult: (result: any, options: any, theme: any, context: any) => renderAdvisorResult(result, options, theme, context),
 
-    async execute(toolCallId: string, rawParams: unknown, signal: AbortSignal | undefined, _onUpdate: unknown, ctx: AdvisorToolContext) {
+    async execute(toolCallId: string, rawParams: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: AdvisorToolContext) {
       try {
-        return await consult(toolCallId, rawParams, signal, ctx);
+        return await consult(toolCallId, rawParams, signal, onUpdate, ctx);
       } catch (error) {
         // Failed tool result with a stable `[CODE] message` prefix and redacted detail.
         throw new Error(errorText(error));
