@@ -28,7 +28,8 @@ test('parser supports quoted focus and rejects invalid combinations', () => {
   assert.throws(() => containedFile('C:/workspace', '../secret'));
 });
 test('rich HELP documents the file restriction, account cost, and configured models', () => {
-  assert.equal(HELP.split('\n')[0].startsWith('/cc-review [auto|plan|spec|code|repo]'), true);
+  assert.equal(HELP.split('\n')[0].startsWith('/cc-review [auto|plan|spec|code|repo|advise]'), true);
+  assert.match(HELP, /advise +Ask one advisor/);
   assert.match(HELP, /--file <path>[^\n]*plan and spec only/);
   assert.match(HELP, /account usage/i);
   assert.ok(HELP.includes(COORDINATOR_MODEL));

@@ -15,7 +15,7 @@ const phases: Record<ReviewProgressState['phase'], string> = {
   starting: 'Starting Claude Code…',
   delegating: 'Invoking native reviewers',
   synthesizing: 'Reconciling reviewer evidence',
-  validating: 'Validating native delegation',
+  validating: 'Validating Claude output',
   cancelling: 'Cancelling Claude process…',
 };
 const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -45,7 +45,11 @@ export class ProgressView implements ReviewProgressView {
     const elapsed = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
     const spinner = frames[Math.floor((this.clock() - this.startedAt) / 150) % frames.length];
     const hint = this.isArmed() && !this.cancelling ? 'Press Esc again to cancel' : 'Esc: cancel';
-    const rows = [`${spinner} Claude Code Review · ${this.mode} · ${this.coordinatorModel} → ${this.state.requiredAgents.length}× ${this.reviewerModel} · ${this.effort}`, `Stage: ${phases[this.state.phase]}`, `Elapsed: ${elapsed} · Reviewers: ${this.state.invokedAgents.length}/${this.state.requiredAgents.length}`, ...this.state.requiredAgents.map(name => `${this.state.invokedAgents.includes(name) ? '✓' : '○'} ${name}`), hint];
+    const advisor = this.state.requiredAgents.length === 0;
+    const stage = advisor && ['starting', 'delegating', 'synthesizing'].includes(this.state.phase) ? 'Consulting advisor…' : phases[this.state.phase];
+    const rows = advisor
+      ? [`${spinner} Claude Code Advisor · ${this.coordinatorModel} · ${this.effort}`, `Stage: ${stage}`, `Elapsed: ${elapsed}`, hint]
+      : [`${spinner} Claude Code Review · ${this.mode} · ${this.coordinatorModel} → ${this.state.requiredAgents.length}× ${this.reviewerModel} · ${this.effort}`, `Stage: ${stage}`, `Elapsed: ${elapsed} · Reviewers: ${this.state.invokedAgents.length}/${this.state.requiredAgents.length}`, ...this.state.requiredAgents.map(name => `${this.state.invokedAgents.includes(name) ? '✓' : '○'} ${name}`), hint];
     if (width < 20) return rows.map(row => this.theme?.fg?.('text', this.fit(row, width)) ?? this.fit(row, width));
     const inner = width - 2;
     const pad = (row: string) => `│${this.fit(row, inner).padEnd(inner)}│`;

@@ -24,9 +24,10 @@ import { join } from 'node:path';
 import { HELP, parseArgs, validatedFile } from './args.ts';
 import { buildClaudeArgs, CLAUDE_ENV, requiredAgents } from './agents.ts';
 import { cleanupBundle, createBundle } from './bundle.ts';
-import { COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
+import { ADVISOR_EFFORT, ADVISOR_MODEL, COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
+import { createAdviseRunner, DEFAULT_ADVISOR_QUESTION, type AdviceResult } from './advise.ts';
 import { buildContextEntries, truncateUtf8 } from './context.ts';
-import { collectGit } from './git.ts';
+import { collectGit, collectGitSummary } from './git.ts';
 import { collectFolder } from './folder.ts';
 import { runProcess, type ProcessRunOptions, type ProcessResult } from './process.ts';
 import type { ReviewProgressView } from './ui.ts';
@@ -43,7 +44,8 @@ import { createProgressView } from './ui.ts';
 import { createApprovalTool } from './approval-tool.ts';
 import { createApprovalStore } from './approval-state.ts';
 import type { ApprovalToolContext, ApprovalToolDefinition } from './approval-types.ts';
-import { LIMITS, ReviewError, type EffectiveMode } from './types.ts';
+import { LIMITS, ReviewError, type EffectiveMode, type ReviewArgs } from './types.ts';
+import { combinedSignal, getClaudeVersion, preflight, releaseLock, throwIfCancelled, tryAcquireLock } from './runtime.ts';
 
 type Deps = {
   run?: typeof runProcess;
@@ -52,6 +54,7 @@ type Deps = {
   cleanup?: typeof cleanupBundle;
   file?: typeof validatedFile;
   folder?: typeof collectFolder;
+  gitSummary?: typeof collectGitSummary;
 };
 
 const AUTO_FALLBACK_ERRORS = new Set([
@@ -59,62 +62,7 @@ const AUTO_FALLBACK_ERRORS = new Set([
   'NO_CODE_CHANGES',
 ]);
 
-let running = false;
-let checkedAt = 0;
-let claudeVersion = 'unknown';
-
-function throwIfCancelled(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new ReviewError('PROCESS_CANCELLED', 'Claude Code review cancelled.');
-}
-
-function combinedSignal(primary: AbortSignal, external: AbortSignal | undefined): AbortSignal {
-  return external ? AbortSignal.any([primary, external]) : primary;
-}
-
 function errorCode(error: unknown) { return typeof error === 'object' && error !== null && 'code' in error && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : undefined; }
-function supportsRequiredClaudeVersion(version: string) {
-  const match = version.match(/(\d+)\.(\d+)\.(\d+)/);
-  if (!match) return false;
-  const [major, minor, patch] = match.slice(1).map(Number);
-  return major > 2
-    || (major === 2 && minor > 1)
-    || (major === 2 && minor === 1 && patch >= 205);
-}
-
-async function preflight(pi: CommandPiApi, cwd: string) {
-  if (Date.now() - checkedAt < 300_000) return;
-
-  const version = await pi.exec('claude', ['--version'], {
-    cwd,
-    timeout: 10_000,
-  });
-  if (version.code !== 0) {
-    throw new ReviewError(
-      'CLAUDE_NOT_FOUND',
-      'Claude Code is unavailable. Install or repair Claude Code.',
-    );
-  }
-
-  claudeVersion = version.stdout.trim();
-  if (!supportsRequiredClaudeVersion(claudeVersion)) {
-    throw new ReviewError(
-      'CLAUDE_VERSION_UNSUPPORTED',
-      'Claude Code 2.1.205 or later is required.',
-    );
-  }
-
-  const auth = await pi.exec('claude', ['auth', 'status'], {
-    cwd,
-    timeout: 10_000,
-  });
-  if (auth.code !== 0) {
-    throw new ReviewError(
-      'CLAUDE_NOT_AUTHENTICATED',
-      'Claude Code is not authenticated. Run: claude auth login',
-    );
-  }
-  checkedAt = Date.now();
-}
 
 async function readStopHookState(directory: string): Promise<{ fired: number; blocks: number }> {
   try {
@@ -149,6 +97,49 @@ export function createCommandHandler(
   const cleanup = overrides.cleanup ?? cleanupBundle;
   const file = overrides.file ?? validatedFile;
   const folder = overrides.folder ?? collectFolder;
+  const adviseRunner = createAdviseRunner(pi, {
+    run,
+    cleanup,
+    ...(overrides.gitSummary === undefined ? {} : { gitSummary: overrides.gitSummary }),
+  });
+
+  const runAdviseCommand = async (args: ReviewArgs, ctx: CommandContext): Promise<CompletedReview> => {
+    const request = { question: args.focus ?? DEFAULT_ADVISOR_QUESTION, keepBundle: args.keepBundle };
+    ctx.ui.notify(`Consulting Claude Code advisor (1× ${ADVISOR_MODEL}, ${ADVISOR_EFFORT} effort)…`, 'info');
+    const useProgressUi = ctx.mode === 'tui' && ctx.hasUI === true && typeof ctx.ui.custom === 'function';
+    let advice: AdviceResult;
+    if (useProgressUi) {
+      const custom = ctx.ui.custom!;
+      const outcome = await custom<{ ok: true; value: AdviceResult } | { ok: false; error: unknown }>((tui, theme, _keys, done) => {
+        let view: ReviewProgressView;
+        const reducer = createProgressReducer([], state => view?.update(state));
+        view = createProgressView(tui, theme, 'advise', ADVISOR_MODEL, '', ADVISOR_EFFORT, reducer.snapshot());
+        view.onAbort = () => reducer.setPhase('cancelling');
+        ctx.signal?.addEventListener('abort', () => reducer.setPhase('cancelling'), { once: true });
+        void adviseRunner(request, ctx, { signal: combinedSignal(view.signal, ctx.signal), onStdoutLine: reducer.ingest })
+          .then(value => { view.dispose(); done({ ok: true, value }); })
+          .catch(error => { view.dispose(); done({ ok: false, error }); });
+        return view;
+      });
+      if (outcome.ok === false) throw outcome.error;
+      advice = outcome.value;
+    } else {
+      advice = await adviseRunner(request, ctx, ctx.signal === undefined ? {} : { signal: ctx.signal });
+    }
+    const completionNotice = `Claude Code advisor verdict: ${advice.verdict} (${formatDuration(advice.durationMs)}).`;
+    if (delivery === 'session') {
+      try {
+        pi.sendMessage(
+          { customType: 'cc-advise-result', display: true, content: advice.content, details: advice.details },
+          { triggerTurn: !args.raw, deliverAs: 'followUp' },
+        );
+      } catch {
+        throw new ReviewError('PI_INJECTION_FAILED', 'The advice was valid but could not be added to the Pi session.');
+      }
+    }
+    ctx.ui.notify(completionNotice, 'info');
+    return { content: advice.content, details: advice.details, raw: args.raw, completionNotice };
+  };
 
   return async (input: string, ctx: CommandContext) => {
     let bundle: Awaited<ReturnType<typeof createBundle>> | undefined;
@@ -161,14 +152,14 @@ export function createCommandHandler(
         ctx.ui.notify(HELP, 'info');
         return;
       }
-      if (running) {
+      if (args.mode === 'advise') return await runAdviseCommand(args, ctx);
+      if (!tryAcquireLock()) {
         ctx.ui.notify(
           '[ALREADY_RUNNING] A Claude Code review is already running.',
           'warning',
         );
         return;
       }
-      running = true;
       ownsLock = true;
 
       throwIfCancelled(ctx.signal);
@@ -331,7 +322,7 @@ export function createCommandHandler(
         invokedAgents: parsed.invokedAgents,
         completedAgents: parsed.completedAgents,
         validDelegation: true,
-        claudeVersion,
+        claudeVersion: getClaudeVersion(),
         coordinatorModel: COORDINATOR_MODEL,
         reviewerModel: REVIEWER_MODEL,
         observedCoordinatorModel: parsed.initModel,
@@ -386,7 +377,7 @@ export function createCommandHandler(
       if (bundle && !args?.keepBundle) {
         await cleanup(bundle.directory).catch(() => {});
       }
-      if (ownsLock) running = false;
+      if (ownsLock) releaseLock();
     }
   };
 }
@@ -430,6 +421,7 @@ export function registerExtension(pi: ExtensionAPI, overrides: Deps = {}): void 
     'spec',
     'code',
     'repo',
+    'advise',
     '--file',
     '--base',
     '--focus',

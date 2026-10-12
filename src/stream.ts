@@ -10,6 +10,8 @@ export interface StreamRunError {
 export interface Parsed {
   finalText: string;
   invokedAgents: string[];
+  /** Unique tool names used by the top-level process and any subagent. */
+  toolUses: string[];
   completedAgents: string[];
   failedAgents: Record<string, string>;
   malformed: string[];
@@ -65,6 +67,7 @@ function cloneParsed(parsed: Parsed): Parsed {
   return {
     ...parsed,
     invokedAgents: [...parsed.invokedAgents],
+    toolUses: [...parsed.toolUses],
     completedAgents: [...parsed.completedAgents],
     failedAgents: { ...parsed.failedAgents },
     malformed: [...parsed.malformed],
@@ -86,6 +89,7 @@ export function createStreamCollector() {
   const parsed: Parsed = {
     finalText: '',
     invokedAgents: [],
+    toolUses: [],
     completedAgents: [],
     failedAgents: {},
     malformed: [],
@@ -152,6 +156,9 @@ export function createStreamCollector() {
     if (event.usage) parsed.usage = event.usage;
 
     for (const content of event.message?.content ?? []) {
+      if (content.type === 'tool_use' && typeof content.name === 'string' && !parsed.toolUses.includes(content.name)) {
+        parsed.toolUses.push(content.name);
+      }
       if (content.type === 'tool_use' && content.name === 'Agent') {
         const name = extractAgentName(content);
         if (typeof name === 'string' && !parsed.invokedAgents.includes(name)) {

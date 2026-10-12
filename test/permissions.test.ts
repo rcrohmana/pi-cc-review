@@ -27,6 +27,9 @@ test('review argv scopes Read to the working directory and injects deny rules ne
     assert.equal(args[args.indexOf('--tools') + 1], 'Agent,Read,Grep,Glob');
     assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
     assert.equal(args[args.indexOf('--add-dir') + 1], 'C:/tmp/bundle');
+    for (const flag of ['--add-dir', '--tools', '--allowedTools', '--disallowedTools']) {
+      assert.ok(args[args.indexOf(flag) + 2].startsWith('--'), `${flag} must be followed by another flag`);
+    }
     const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
     assert.deepEqual(settings.permissions, { deny: buildDenyRules() });
     assert.ok(settings.hooks.Stop && settings.hooks.PostToolUse && settings.hooks.PostToolUseFailure);

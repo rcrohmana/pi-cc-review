@@ -115,3 +115,36 @@ export async function collectGit(cwd: string, base?: string) {
     truncated: working.truncated || staged.truncated || baseResult.truncated,
   };
 }
+
+const GIT_SUMMARY_LIMIT = 20_000;
+
+/**
+ * Advise-mode Git context (decision D3): branch, `status --short`, and `diff --stat` for
+ * staged plus unstaged changes. Never throws: returns undefined outside a repository or on
+ * any Git failure. Full diffs are deliberately omitted; the advisor can Read files.
+ */
+export async function collectGitSummary(cwd: string): Promise<string | undefined> {
+  try {
+    const branch = (await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const status = await git(cwd, ['status', '--short', '--untracked-files=all']);
+    const unstaged = await git(cwd, ['diff', '--stat', '--no-ext-diff']);
+    const staged = await git(cwd, ['diff', '--cached', '--stat', '--no-ext-diff']);
+    const text = [
+      `Branch: ${branch}`,
+      '',
+      '## git status --short',
+      status.trimEnd() || '(clean)',
+      '',
+      '## git diff --stat (unstaged)',
+      unstaged.trimEnd() || '(none)',
+      '',
+      '## git diff --cached --stat (staged)',
+      staged.trimEnd() || '(none)',
+    ].join('\n');
+    return text.length > GIT_SUMMARY_LIMIT
+      ? `${text.slice(0, GIT_SUMMARY_LIMIT)}\n[TRUNCATED: git summary limit]`
+      : text;
+  } catch {
+    return undefined;
+  }
+}

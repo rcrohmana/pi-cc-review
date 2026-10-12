@@ -1,5 +1,6 @@
-export type Mode = 'auto' | 'plan' | 'spec' | 'code' | 'repo';
-export type EffectiveMode = Exclude<Mode, 'auto'>;
+export type Mode = 'auto' | 'plan' | 'spec' | 'code' | 'repo' | 'advise';
+/** Review modes after auto resolution; `advise` is a separate single-process path. */
+export type EffectiveMode = Exclude<Mode, 'auto' | 'advise'>;
 
 export interface ReviewArgs {
   mode: Mode;

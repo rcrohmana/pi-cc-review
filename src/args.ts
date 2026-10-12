@@ -1,6 +1,6 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
+import { ADVISOR_EFFORT, ADVISOR_MODEL, COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
 import { ReviewError, type ReviewArgs } from './types.ts';
 
 interface FileSystemOperations {
@@ -10,10 +10,11 @@ interface FileSystemOperations {
 
 const defaultFileSystem: FileSystemOperations = { realpath, stat };
 
-export const HELP = `/cc-review [auto|plan|spec|code|repo] [--file <path>] [--base <git-ref>] [--focus <text>] [--deep] [--raw] [--keep-bundle] [--help]
+export const HELP = `/cc-review [auto|plan|spec|code|repo|advise] [--file <path>] [--base <git-ref>] [--focus <text>] [--deep] [--raw] [--keep-bundle] [--help]
 
 Read-only Claude Code second-opinion review. Invokes Claude Code and consumes
-account usage: 1× ${COORDINATOR_MODEL} coordinator + 2–3× ${REVIEWER_MODEL} reviewers at ${REVIEW_EFFORT} effort.
+account usage: 1× ${COORDINATOR_MODEL} coordinator + 2–3× ${REVIEWER_MODEL} reviewers at ${REVIEW_EFFORT} effort
+(advise: 1× ${ADVISOR_MODEL} advisor at ${ADVISOR_EFFORT} effort, no reviewers).
 
 Modes:
   auto  (default) Review Git changes; falls back to plan when none exist
@@ -21,11 +22,13 @@ Modes:
   spec  Review a specification artifact (commonly with --file)
   code  Review working-tree, staged, and optional --base Git changes
   repo  Review a bounded read-only snapshot of the current folder (no Git needed)
+  advise  Ask one advisor for short guidance on the current task (verdict: proceed,
+          revise, stop, or decline); uses the recent session transcript
 
 Options:
   --file <path>   Use this file as the review artifact (plan and spec only)
   --base <ref>    Also diff against this Git ref (code and auto only)
-  --focus <text>  Reviewer focus, quoted, max 2,000 characters
+  --focus <text>  Reviewer focus or advisor question, quoted, max 2,000 characters
   --deep          Add a third reviewer (security/risk) and a higher turn cap
   --raw           Display the review without triggering a Pi follow-up turn
   --keep-bundle   Keep the temporary evidence bundle and raw stream (stream.ndjson) and report the path
@@ -34,7 +37,8 @@ Options:
 Examples:
   /cc-review repo --deep --focus "correctness, security, tests"
   /cc-review code --base main
-  /cc-review spec --file docs/spec.md`;
+  /cc-review spec --file docs/spec.md
+  /cc-review advise --focus "Is retrying the migration the right next step?"`;
 function tokens(input: string) {
   const output: string[] = [];
   let quote = '';
@@ -83,7 +87,7 @@ export function parseArgs(input: string): ReviewArgs {
       const key = arg.slice(2) as 'file' | 'base' | 'focus';
       if (result[key]) throw new ReviewError('USAGE_ERROR', `Duplicate ${arg}.`);
       result[key] = value;
-    } else if (['auto', 'plan', 'spec', 'code', 'repo'].includes(arg) && !modeSeen) {
+    } else if (['auto', 'plan', 'spec', 'code', 'repo', 'advise'].includes(arg) && !modeSeen) {
       result.mode = arg as ReviewArgs['mode'];
       modeSeen = true;
     } else {
@@ -96,6 +100,9 @@ export function parseArgs(input: string): ReviewArgs {
   }
   if (result.base && result.mode !== 'code' && result.mode !== 'auto') {
     throw new ReviewError('USAGE_ERROR', '--base is only valid for code review.');
+  }
+  if (result.deep && result.mode === 'advise') {
+    throw new ReviewError('USAGE_ERROR', '--deep is not valid for advise.');
   }
   if ((result.focus?.length ?? 0) > 2_000) {
     throw new ReviewError('USAGE_ERROR', '--focus exceeds 2,000 characters.');
