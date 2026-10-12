@@ -118,7 +118,7 @@ export function createApprovalTool(options: {
     description: 'Creates a confirmation-gated request and, after exact user approval, runs the existing read-only /cc-review workflow directly; it never runs Claude independently.',
     promptSnippet: 'Request or execute a user-approved /cc-review workflow',
     parameters: approvalParametersSchema,
-    async execute(_toolCallId, rawParams: ApprovalInput, _signal, _onUpdate, ctx: ApprovalToolContext) {
+    async execute(_toolCallId, rawParams: ApprovalInput, signal, _onUpdate, ctx: ApprovalToolContext) {
       const params = validateApprovalInput(rawParams);
       if (params.phase === 'request') {
         const createdAt = now();
@@ -135,9 +135,12 @@ export function createApprovalTool(options: {
       const decision = evaluateApproval(options.store, ctx.sessionManager, input.requestId, now());
       if (decision.kind !== 'approved') stateError(decision);
       const record = decision.record;
+      if (signal?.aborted) {
+        throw new ReviewError('PROCESS_CANCELLED', 'Claude Code review cancelled before it started.');
+      }
       options.store.consume(record);
       try {
-        const completed = await options.executeReview(record.canonicalTail, ctx);
+        const completed = await options.executeReview(record.canonicalTail, ctx, signal);
         const details = {
           ...stateDetails('execute', record, 'completed'),
           review: completed.details,

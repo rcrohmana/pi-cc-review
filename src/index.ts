@@ -8,7 +8,7 @@ type ExtensionAPI = CommandPiApi & {
   registerTool: (definition: ApprovalToolDefinition) => void;
 };
 type UiLike = { notify(message: string, type?: 'info'|'warning'|'error'): void; custom?: <T>(factory: (tui: TuiLike, theme: ThemeLike, keys: unknown, done: (result: T) => void) => unknown) => Promise<T> };
-export type CommandContext = { cwd: string; mode?: string; hasUI?: boolean; ui: UiLike; sessionManager: { buildContextEntries(): unknown[] } };
+export type CommandContext = { cwd: string; mode?: string; hasUI?: boolean; signal?: AbortSignal; ui: UiLike; sessionManager: { buildContextEntries(): unknown[] } };
 export interface CompletedReview {
   content: string;
   details: Record<string, unknown>;
@@ -62,6 +62,14 @@ const AUTO_FALLBACK_ERRORS = new Set([
 let running = false;
 let checkedAt = 0;
 let claudeVersion = 'unknown';
+
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new ReviewError('PROCESS_CANCELLED', 'Claude Code review cancelled.');
+}
+
+function combinedSignal(primary: AbortSignal, external: AbortSignal | undefined): AbortSignal {
+  return external ? AbortSignal.any([primary, external]) : primary;
+}
 
 function errorCode(error: unknown) { return typeof error === 'object' && error !== null && 'code' in error && typeof (error as { code?: unknown }).code === 'string' ? (error as { code: string }).code : undefined; }
 function supportsRequiredClaudeVersion(version: string) {
@@ -163,6 +171,7 @@ export function createCommandHandler(
       running = true;
       ownsLock = true;
 
+      throwIfCancelled(ctx.signal);
       await preflight(pi, ctx.cwd);
 
       let mode: EffectiveMode;
@@ -229,6 +238,7 @@ export function createCommandHandler(
         throw new ReviewError('BUNDLE_CREATION_FAILED', 'Could not create the review bundle.');
       }
 
+      throwIfCancelled(ctx.signal);
       ctx.ui.notify(`Starting Claude Code ${mode} review (1× ${COORDINATOR_MODEL} + ${reviewers.length}× ${REVIEWER_MODEL}, ${REVIEW_EFFORT} effort)…`, 'info');
       const executeRunAndValidate = async (options: ExecutionOptions = {}): Promise<RunOutcome> => {
         const streamPath = join(bundle!.directory, 'stream.ndjson');
@@ -287,7 +297,8 @@ export function createCommandHandler(
           const reducer = createProgressReducer(reviewers, state => view?.update(state));
           view = createProgressView(tui, theme, mode, COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT, reducer.snapshot());
           view.onAbort = () => reducer.setPhase('cancelling');
-          void executeRunAndValidate({ signal: view.signal, onStdoutLine: reducer.ingest, reducer })
+          ctx.signal?.addEventListener('abort', () => reducer.setPhase('cancelling'), { once: true });
+          void executeRunAndValidate({ signal: combinedSignal(view.signal, ctx.signal), onStdoutLine: reducer.ingest, reducer })
             .then(value => { view.dispose(); done({ ok: true, value }); })
             .catch(error => { view.dispose(); done({ ok: false, error }); });
           return view;
@@ -303,7 +314,11 @@ export function createCommandHandler(
           heartbeatSeen = state.invokedAgents.length;
           if (state.phase === 'synthesizing') ctx.ui.notify('All reviewers invoked; reconciling evidence…', 'info');
         });
-        runOutcome = await executeRunAndValidate({ onStdoutLine: reducer.ingest, reducer });
+        runOutcome = await executeRunAndValidate({
+          ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+          onStdoutLine: reducer.ingest,
+          reducer,
+        });
       }
       const result = runOutcome.result;
       const parsed = runOutcome.parsed;
@@ -375,7 +390,7 @@ export function createCommandHandler(
   };
 }
 
-function commandContextFromApproval(ctx: ApprovalToolContext): CommandContext {
+function commandContextFromApproval(ctx: ApprovalToolContext, signal?: AbortSignal): CommandContext {
   const { sessionManager, ui } = ctx;
   if (!ui || typeof sessionManager.buildContextEntries !== 'function') {
     throw new ReviewError('CC_REVIEW_EXECUTION_FAILED', 'Approved review context is unavailable.');
@@ -390,6 +405,7 @@ function commandContextFromApproval(ctx: ApprovalToolContext): CommandContext {
     cwd: ctx.cwd,
     ...(ctx.mode === undefined ? {} : { mode: ctx.mode }),
     ...(ctx.hasUI === undefined ? {} : { hasUI: ctx.hasUI }),
+    ...(signal === undefined ? {} : { signal }),
     ui: commandUi,
     sessionManager: { buildContextEntries: () => sessionManager.buildContextEntries!() },
   };
@@ -401,8 +417,8 @@ export function registerExtension(pi: ExtensionAPI, overrides: Deps = {}): void 
   const approvedHandler = createCommandHandler(pi, overrides, { delivery: 'return', rethrow: true });
   pi.registerTool(createApprovalTool({
     store: approvalStore,
-    executeReview: async (canonicalTail, ctx) => {
-      const result = await approvedHandler(canonicalTail, commandContextFromApproval(ctx));
+    executeReview: async (canonicalTail, ctx, signal) => {
+      const result = await approvedHandler(canonicalTail, commandContextFromApproval(ctx, signal));
       if (!result) throw new ReviewError('CC_REVIEW_EXECUTION_FAILED', 'The approved review did not complete.');
       return result;
     },

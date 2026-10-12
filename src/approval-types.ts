@@ -116,6 +116,7 @@ export interface ApprovedReviewResult {
 export type ExecuteApprovedReview = (
   canonicalTail: string,
   ctx: ApprovalToolContext,
+  signal?: AbortSignal,
 ) => Promise<ApprovedReviewResult>;
 
 export interface ApprovalToolDefinition {

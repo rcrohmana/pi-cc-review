@@ -27,6 +27,9 @@ export async function runProcess(
   timeoutMs: number,
   options: ProcessRunOptions = {},
 ): Promise<ProcessResult> {
+  if (options.signal?.aborted) {
+    throw new ReviewError('PROCESS_CANCELLED', 'Claude Code review cancelled.');
+  }
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const child = spawn(command, args, {
