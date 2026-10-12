@@ -43,3 +43,42 @@ test('README documents routing, reload invalidation, and raw semantics', async (
   assert.doesNotMatch(readme, /sendUserMessage/);
   assert.match(readme, /fake.*live Claude|no paid\/live Claude/i);
 });
+
+test('skill explains advisor consultations without weakening the review gate', async () => {
+  const source = await readFile(skillPath, 'utf8');
+  assert.match(source, /^description: .*consult the Claude Code advisor/m);
+  assert.match(source, /## Advisor consultations \(`cc_advise`\)/);
+  assert.match(source, /never create an approval request for advice/i);
+  assert.match(source, /before committing to a non-trivial approach/i);
+  assert.match(source, /same error or failed attempt has recurred twice/i);
+  assert.match(source, /before declaring a multi-step task complete/i);
+  assert.match(source, /changed a test, an assertion, or an expected value/i);
+  assert.match(source, /never more than once per assistant message/i);
+  assert.match(source, /do not enable it yourself/i);
+  assert.match(source, /Only a user-typed slash command enables the advisor/);
+  assert.match(source, /\/cc-advisor on \[--max N\]/);
+  assert.match(source, /\/cc-review advise --focus/);
+  assert.match(source, /Never use `cc_advise` to bypass the review gate/);
+  assert.match(source, /For reviews, the only permitted route is `cc_review_approval`/);
+});
+
+test('tool guidelines and skill agree on when to consult', async () => {
+  const { ADVISOR_PROMPT_GUIDELINES } = await import('../src/advisor-tool.ts');
+  const skill = await readFile(skillPath, 'utf8');
+  const guidelines = ADVISOR_PROMPT_GUIDELINES.join('\n');
+  for (const phrase of [
+    'before committing to a non-trivial approach',
+    'choosing between alternative designs',
+    'before writing the implementation, not after',
+    'same error or failed attempt has recurred twice',
+    'before declaring a multi-step task complete',
+    'changed a test, an assertion, or an expected value',
+    'consult the advisor',
+    'trivial edits, routine steps',
+    'cc_review_approval',
+  ]) {
+    assert.ok(guidelines.includes(phrase), `guidelines: ${phrase}`);
+    assert.ok(skill.includes(phrase), `skill: ${phrase}`);
+  }
+  assert.ok(ADVISOR_PROMPT_GUIDELINES.every((line: string) => line.includes('cc_advise')), 'each guideline names the tool');
+});

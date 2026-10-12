@@ -231,3 +231,15 @@ test('advisor state unit: reserve checks order and session binding', () => {
   assert.equal(state.current('other'), undefined);
   assert.throws(() => state.grant('', 1), /identity is unavailable/);
 });
+
+test('cc_advise carries its consultation guidelines (system prompt only while active)', () => {
+  const h = setup();
+  assert.ok(Array.isArray(h.tool.promptGuidelines) && h.tool.promptGuidelines.length >= 4);
+  const text = h.tool.promptGuidelines.join('\n');
+  assert.match(text, /decision points/);
+  assert.match(text, /before writing the implementation, not after/);
+  assert.match(text, /Do not call it on every turn/);
+  assert.match(text, /verify it against files and test results/);
+  assert.match(text, /stop verdict means pause and consult the user/);
+  assert.match(text, /not a substitute for a full review/);
+});

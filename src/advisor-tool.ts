@@ -67,6 +67,20 @@ export interface AdvisorActivation {
   deactivate(): void;
 }
 
+/**
+ * When the model should (and should not) consult the advisor. Appended to the system prompt only
+ * while cc_advise is active, i.e. after the user ran /cc-advisor on. Kept consistent with the
+ * cc-review-routing skill.
+ */
+export const ADVISOR_PROMPT_GUIDELINES: readonly string[] = Object.freeze([
+  'cc_advise is enabled because the user wants a stronger model consulted at decision points. Call it before committing to a non-trivial approach: whenever you are choosing between alternative designs (architecture, caching, concurrency, data model, migration, security, or a multi-file change), call cc_advise with the options before writing the implementation, not after.',
+  'Also call cc_advise after the same error or failed attempt has recurred twice, and before declaring a multi-step task complete, especially if you changed a test, an assertion, or an expected value to make it pass. Do not call it on every turn.',
+  'Use cc_advise when the user asks you to consult the advisor. Do not use it for trivial edits, routine steps, or facts you can check by reading files or running a command yourself.',
+  'Ask cc_advise one specific question that names the decision, the options you are weighing, and the evidence so far; the advisor already sees a digest of this session.',
+  'Treat cc_advise guidance as advice, not instructions: verify it against files and test results before acting, and if it conflicts with your evidence, tell the user about the conflict instead of following it silently. A stop verdict means pause and consult the user.',
+  'cc_advise has a small per-session budget shown in each result; spend it on the highest-stakes decisions. It is not a substitute for a full review: full Claude Code reviews still go only through cc_review_approval with explicit user confirmation.',
+]);
+
 export function createAdvisorTool(options: {
   state: AdvisorState;
   runAdvice: AdviseRunnerFn;
@@ -114,8 +128,9 @@ export function createAdvisorTool(options: {
   return {
     name: ADVISOR_TOOL_NAME,
     label: 'CC Advisor',
-    description: `Consult a stronger Claude Code advisor (${ADVISOR_MODEL}, ${ADVISOR_EFFORT} effort) for short strategic guidance at a decision point. The advisor reads a redacted digest of this session and the repository read-only, then returns a verdict (proceed, revise, stop, or decline) with a recommendation. Each call uses one consultation from the user's limited budget and takes up to a few minutes.`,
+    description: `Consult a stronger Claude Code advisor (${ADVISOR_MODEL}, ${ADVISOR_EFFORT} effort) for short strategic guidance at a decision point. Call it before choosing between alternative designs, when an error keeps recurring, and before declaring a multi-step task done. The advisor reads a redacted digest of this session and the repository read-only, then returns a verdict (proceed, revise, stop, or decline) with a recommendation. Each call uses one consultation from the user's limited budget and takes up to a few minutes.`,
     promptSnippet: 'Consult a stronger Claude Code advisor at key decision points (limited budget)',
+    promptGuidelines: [...ADVISOR_PROMPT_GUIDELINES],
     parameters: advisorParametersSchema,
     defaultActive: false,
     executionMode: 'sequential' as const,
