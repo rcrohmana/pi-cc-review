@@ -50,6 +50,9 @@ function stringErrors(value: unknown): string[] {
     : [];
 }
 
+/** Claude Code's acknowledgement for a background Agent launch; not a completed review. */
+const ASYNC_LAUNCH = /^\s*Async agent launched/i;
+
 function toolResultText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (!Array.isArray(value)) return '';
@@ -161,9 +164,12 @@ export function createStreamCollector() {
       if (content.type === 'tool_result' && typeof content.tool_use_id === 'string') {
         const name = agentCalls.get(content.tool_use_id);
         if (name !== undefined) {
-          if (content.is_error === true) {
+          const text = toolResultText(content.content);
+          if (content.is_error === true || ASYNC_LAUNCH.test(text)) {
             if (!parsed.completedAgents.includes(name)) {
-              parsed.failedAgents[name] = toolResultText(content.content).slice(0, 300);
+              parsed.failedAgents[name] = content.is_error === true
+                ? text.slice(0, 300)
+                : 'launched in the background without a returned report';
             }
           } else if (!parsed.completedAgents.includes(name)) {
             parsed.completedAgents.push(name);

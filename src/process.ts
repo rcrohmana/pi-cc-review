@@ -19,6 +19,8 @@ export interface ProcessRunOptions {
   signal?: AbortSignal;
   onStdoutLine?: (line: string) => void;
   stdoutFile?: string;
+  /** Extra environment variables merged over the inherited environment. */
+  env?: Readonly<Record<string, string>>;
 }
 export async function runProcess(
   command: string,
@@ -34,6 +36,7 @@ export async function runProcess(
     const started = Date.now();
     const child = spawn(command, args, {
       cwd,
+      ...(options.env === undefined ? {} : { env: { ...process.env, ...options.env } }),
       shell: false,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],

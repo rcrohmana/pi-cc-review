@@ -1,6 +1,49 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+/** Claude Code's acknowledgement for a background Agent launch; not a completed review. */
+export const ASYNC_LAUNCH_PATTERN = /^\s*Async agent launched/i;
+
+export function outcomesPathFor(stateFile) {
+  return join(dirname(stateFile), 'agent-outcomes.jsonl');
+}
+
+function resultText(value) {
+  if (typeof value === 'string') return value;
+  if (!Array.isArray(value)) return '';
+  return value.map(part => (typeof part?.text === 'string' ? part.text : '')).join(' ');
+}
+
+/**
+ * PostToolUse / PostToolUseFailure hook payload -> one outcome line.
+ * Status is "failed" for failures, otherwise Claude Code's tool_response.status
+ * ("completed" for foreground agents, "async_launched" for background launches).
+ */
+export function outcomeFromPayload(payload) {
+  if (payload?.tool_name !== 'Agent' && payload?.tool_name !== 'Task') return undefined;
+  const input = payload.tool_input ?? {};
+  const name = input.subagent_type ?? input.agent ?? input.name;
+  if (typeof name !== 'string' || !name) return undefined;
+  const status = payload.hook_event_name === 'PostToolUseFailure'
+    ? 'failed'
+    : (typeof payload.tool_response?.status === 'string' ? payload.tool_response.status : 'unknown');
+  return { name, status };
+}
+
+/** A reviewer counts as completed unless every outcome for it failed or was only a background launch. */
+export function completedFromOutcomes(text) {
+  const completed = [];
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let outcome;
+    try { outcome = JSON.parse(line); } catch { continue; }
+    if (typeof outcome?.name !== 'string' || typeof outcome.status !== 'string') continue;
+    if (outcome.status === 'failed' || outcome.status.startsWith('async')) continue;
+    if (!completed.includes(outcome.name)) completed.push(outcome.name);
+  }
+  return completed;
+}
 
 export function extractAgentName(content) {
   if (content?.type !== 'tool_use') return undefined;
@@ -50,6 +93,7 @@ export function collectCompletedAgents(transcript) {
       if (!Array.isArray(content)) continue;
       for (const item of content) {
         if (item?.type !== 'tool_result' || item.is_error === true) continue;
+        if (ASYNC_LAUNCH_PATTERN.test(resultText(item.content))) continue;
         const name = calls.get(item.tool_use_id);
         if (typeof name === 'string' && !completed.includes(name)) completed.push(name);
       }
@@ -86,11 +130,28 @@ function writeState(stateFile, state) {
   } catch { /* best-effort */ }
 }
 
+function record(outcomesFile, payload) {
+  const outcome = outcomeFromPayload(payload);
+  if (!outcome || !outcomesFile) return;
+  try {
+    appendFileSync(outcomesFile, `${JSON.stringify(outcome)}\n`);
+  } catch { /* best-effort */ }
+}
+
+function readOptional(path) {
+  try { return typeof path === 'string' ? readFileSync(path, 'utf8') : undefined; } catch { return undefined; }
+}
+
 function main() {
   let payload;
   try {
     payload = JSON.parse(readFileSync(0, 'utf8'));
   } catch { return; }
+
+  if (process.argv[2] === '--record') {
+    record(process.argv[3], payload);
+    return;
+  }
 
   const [stateFile, maxBlocksRaw, requiredCsv] = process.argv.slice(2);
   const maxBlocks = Number.parseInt(maxBlocksRaw, 10);
@@ -99,12 +160,15 @@ function main() {
     .map(name => name.trim())
     .filter(Boolean);
 
-  let transcript;
-  try {
-    transcript = readFileSync(payload?.transcript_path, 'utf8');
-  } catch { return; }
+  // Primary evidence: outcomes recorded by the PostToolUse/PostToolUseFailure hooks.
+  // Fallback: the session transcript, which does not exist under --no-session-persistence.
+  const completed = completedFromOutcomes(readOptional(outcomesPathFor(stateFile)) ?? '');
+  const transcript = readOptional(payload?.transcript_path);
+  if (transcript !== undefined) {
+    for (const name of collectCompletedAgents(transcript)) if (!completed.includes(name)) completed.push(name);
+  }
 
-  const missing = computeMissing(required, collectCompletedAgents(transcript));
+  const missing = computeMissing(required, completed);
   const state = readState(stateFile);
   state.fired += 1;
 

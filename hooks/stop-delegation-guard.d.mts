@@ -4,3 +4,7 @@ export function collectCompletedAgents(transcript: string): string[];
 export function computeMissing(required: string[], invoked: string[]): string[];
 export function buildBlockReason(missing: string[]): string;
 export function readState(stateFile: string): { fired: number; blocks: number };
+export const ASYNC_LAUNCH_PATTERN: RegExp;
+export function outcomesPathFor(stateFile: string): string;
+export function outcomeFromPayload(payload: unknown): { name: string; status: string } | undefined;
+export function completedFromOutcomes(text: string): string[];

@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import {
+  completedFromOutcomes,
+  outcomeFromPayload,
+  outcomesPathFor,
   buildBlockReason,
   collectCompletedAgents,
   collectInvokedAgents,
@@ -134,12 +137,15 @@ test('garbage stdin exits 0 with no output', async () => {
   } finally { await s.cleanup(); }
 });
 
-test('unreadable transcript path exits 0 with no output (fail-open)', async () => {
+test('without any reviewer evidence (no transcript, no outcomes) the hook blocks instead of failing open', async () => {
   const s = await scratch();
   try {
     const result = invoke(s.stateFile, join(s.dir, 'does-not-exist.jsonl'), 'alpha-reviewer,beta-reviewer');
     assert.equal(result.status, 0);
-    assert.equal(result.stdout, '');
+    const decision = JSON.parse(result.stdout);
+    assert.equal(decision.decision, 'block');
+    assert.match(decision.reason, /alpha-reviewer, beta-reviewer/);
+    assert.deepEqual(await s.state(), { fired: 1, blocks: 1 });
   } finally { await s.cleanup(); }
 });
 
@@ -180,4 +186,77 @@ test('a failed or unanswered Agent call still blocks stopping', async () => {
     assert.match(decision.reason, /beta-reviewer/);
     assert.doesNotMatch(decision.reason, /alpha-reviewer/);
   } finally { await s.cleanup(); }
+});
+
+function record(outcomesFile: string, payload: unknown) {
+  return spawnSync(process.execPath, [script, '--record', outcomesFile], { input: JSON.stringify(payload), encoding: 'utf8' });
+}
+
+test('record mode appends one outcome per Agent/Task hook payload and ignores everything else', async () => {
+  const s = await scratch();
+  try {
+    const outcomes = outcomesPathFor(s.stateFile);
+    assert.equal(outcomes, join(s.dir, 'agent-outcomes.jsonl'));
+    const runs = [
+      record(outcomes, { hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'alpha-reviewer' }, tool_response: { status: 'completed' } }),
+      record(outcomes, { hook_event_name: 'PostToolUseFailure', tool_name: 'Agent', tool_input: { subagent_type: 'beta-reviewer' }, error: "Agent type 'beta-reviewer' not found." }),
+      record(outcomes, { hook_event_name: 'PostToolUse', tool_name: 'Task', tool_input: { subagent_type: 'gamma-reviewer', run_in_background: true }, tool_response: { status: 'async_launched' } }),
+      record(outcomes, { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'x' }, tool_response: {} }),
+      spawnSync(process.execPath, [script, '--record', outcomes], { input: 'not json', encoding: 'utf8' }),
+    ];
+    assert.ok(runs.every(run => run.status === 0 && run.stdout === ''));
+    const lines = (await readFile(outcomes, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(lines, [
+      { name: 'alpha-reviewer', status: 'completed' },
+      { name: 'beta-reviewer', status: 'failed' },
+      { name: 'gamma-reviewer', status: 'async_launched' },
+    ]);
+  } finally { await s.cleanup(); }
+});
+
+test('outcome helpers treat failures and background launches as not completed', () => {
+  assert.equal(outcomeFromPayload({ tool_name: 'Read', tool_input: { subagent_type: 'x' } }), undefined);
+  assert.deepEqual(outcomeFromPayload({ hook_event_name: 'PostToolUse', tool_name: 'Agent', tool_input: { agent: 'a' } }), { name: 'a', status: 'unknown' });
+  const text = [
+    JSON.stringify({ name: 'a', status: 'completed' }),
+    JSON.stringify({ name: 'b', status: 'failed' }),
+    JSON.stringify({ name: 'c', status: 'async_launched' }),
+    JSON.stringify({ name: 'd', status: 'unknown' }),
+    'garbage',
+    JSON.stringify({ name: 'b', status: 'completed' }),
+  ].join('\n');
+  assert.deepEqual(completedFromOutcomes(text), ['a', 'd', 'b']);
+});
+
+test('stop hook uses recorded outcomes when no transcript exists (--no-session-persistence)', async () => {
+  const s = await scratch();
+  try {
+    const outcomes = outcomesPathFor(s.stateFile);
+    const missingTranscript = join(s.dir, 'never-written.jsonl');
+    await writeFile(outcomes, [
+      JSON.stringify({ name: 'alpha-reviewer', status: 'completed' }),
+      JSON.stringify({ name: 'beta-reviewer', status: 'async_launched' }),
+    ].join('\n'));
+    const blocked = invoke(s.stateFile, missingTranscript, 'alpha-reviewer,beta-reviewer');
+    const decision = JSON.parse(blocked.stdout);
+    assert.equal(decision.decision, 'block');
+    assert.match(decision.reason, /beta-reviewer/);
+    assert.doesNotMatch(decision.reason, /alpha-reviewer/);
+
+    await writeFile(outcomes, [
+      JSON.stringify({ name: 'alpha-reviewer', status: 'completed' }),
+      JSON.stringify({ name: 'beta-reviewer', status: 'completed' }),
+    ].join('\n'));
+    const allowed = invoke(s.stateFile, missingTranscript, 'alpha-reviewer,beta-reviewer');
+    assert.equal(allowed.stdout, '');
+    assert.deepEqual(await s.state(), { fired: 2, blocks: 1 });
+  } finally { await s.cleanup(); }
+});
+
+test('transcript fallback ignores async-launch acknowledgements', () => {
+  const transcript = [
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'bg', name: 'Agent', input: { subagent_type: 'alpha-reviewer', run_in_background: true } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'bg', content: [{ type: 'text', text: 'Async agent launched successfully. agentId: abc' }] }] } }),
+  ].join('\n');
+  assert.deepEqual(collectCompletedAgents(transcript), []);
 });

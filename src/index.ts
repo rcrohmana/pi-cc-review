@@ -22,7 +22,7 @@ type ExecutionOptions = ProcessRunOptions & { reducer?: ReturnType<typeof create
 import { access, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { HELP, parseArgs, validatedFile } from './args.ts';
-import { buildClaudeArgs, requiredAgents } from './agents.ts';
+import { buildClaudeArgs, CLAUDE_ENV, requiredAgents } from './agents.ts';
 import { cleanupBundle, createBundle } from './bundle.ts';
 import { COORDINATOR_MODEL, REVIEWER_MODEL, REVIEW_EFFORT } from './config.ts';
 import { buildContextEntries, truncateUtf8 } from './context.ts';
@@ -252,7 +252,7 @@ export function createCommandHandler(
           buildClaudeArgs(bundle!.directory, ctx.cwd, reviewers, args!.deep),
           mode === 'repo' ? bundle!.directory : ctx.cwd,
           LIMITS.timeout,
-          { ...options, onStdoutLine, stdoutFile: streamPath },
+          { ...options, onStdoutLine, stdoutFile: streamPath, env: CLAUDE_ENV },
         );
         if (args!.keepBundle) await retainInjectedStream(streamPath, result.stdout);
 

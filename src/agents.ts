@@ -57,11 +57,21 @@ export function buildAgents(names: string[]) {
   }]));
 }
 
+/**
+ * Environment for the Claude process. Disabling background tasks forces every
+ * Agent call to run in the foreground, so its tool_result is the reviewer's
+ * report rather than an "Async agent launched" acknowledgement (verified on
+ * Claude Code 2.1.296, including explicit run_in_background: true).
+ */
+export const CLAUDE_ENV: Readonly<Record<string, string>> = Object.freeze({
+  CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
+});
+
 function coordinatorInstruction(names: string[]) {
   if (names.length === 0 || names.some(name => !Object.hasOwn(PURPOSE, name))) {
     throw new Error('Coordinator reviewers must be extension allowlisted names.');
   }
-  return `Coordinator delegation protocol: first read the review manifest. Then, before ANY independent analysis of the evidence, invoke every required reviewer—${names.join(', ')}—in a single batch of native Agent calls, one per reviewer using its exact subagent_type name. Wait for all reviewer results, then reconcile their evidence into the review. Textual simulation is invalid; a review without those native Agent calls is invalid.`;
+  return `Coordinator delegation protocol: first read the review manifest. Then, before ANY independent analysis of the evidence, invoke every required reviewer—${names.join(', ')}—in a single batch of native Agent calls, one per reviewer using its exact subagent_type name and run_in_background false. Wait for all reviewer results, then reconcile their evidence into the review. Textual simulation is invalid; a review without those native Agent calls is invalid.`;
 }
 
 export function buildClaudeArgs(
@@ -73,8 +83,17 @@ export function buildClaudeArgs(
   const manifest = join(bundle, 'manifest.md');
   const hookScript = fileURLToPath(new URL('../hooks/stop-delegation-guard.mjs', import.meta.url));
   const stateFile = join(bundle, 'stop-hook-state.json');
+  const outcomesFile = join(bundle, 'agent-outcomes.jsonl');
   const stopCommand = `node "${hookScript}" "${stateFile}" 2 ${names.join(',')}`;
-  const settings = { hooks: { Stop: [{ hooks: [{ type: 'command', command: stopCommand, timeout: 30 }] }] } };
+  const recordCommand = `node "${hookScript}" --record "${outcomesFile}"`;
+  const recordHook = [{ matcher: 'Agent|Task', hooks: [{ type: 'command', command: recordCommand, timeout: 30 }] }];
+  const settings = {
+    hooks: {
+      PostToolUse: recordHook,
+      PostToolUseFailure: recordHook,
+      Stop: [{ hooks: [{ type: 'command', command: stopCommand, timeout: 30 }] }],
+    },
+  };
   return [
     '-p',
     '--setting-sources', '',
