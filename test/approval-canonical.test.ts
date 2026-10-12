@@ -61,20 +61,16 @@ function schemaAccepts(schema: SchemaNode, value: unknown): boolean {
   return schema.const === undefined || value === schema.const;
 }
 
-test('schema is a strict two-branch JSON Schema without public target', () => {
-  const schema = approvalParametersSchema as unknown as SchemaNode & { oneOf: SchemaNode[] };
+test('schema has an OpenAI-compatible object root without public target', () => {
+  const schema = approvalParametersSchema as unknown as SchemaNode;
   assert.equal(schema.type, 'object');
-  assert.equal(schema.oneOf.length, 2);
-  assert.ok(schema.oneOf.every(branch => branch.additionalProperties === false));
-  assert.ok(schema.oneOf[0].required?.includes('phase'));
-  assert.ok(schema.oneOf[1].required?.includes('requestId'));
-  assert.equal('target' in (schema.oneOf[0].properties ?? {}), false);
-  assert.equal('target' in (schema.oneOf[1].properties ?? {}), false);
+  assert.equal(schema.oneOf, undefined);
+  assert.equal(schema.additionalProperties, false);
+  assert.ok(schema.required?.includes('phase'));
+  assert.equal('target' in (schema.properties ?? {}), false);
   assert.equal(schemaAccepts(schema, validRequest), true);
   assert.equal(schemaAccepts(schema, validExecute), true);
   assert.equal(schemaAccepts(schema, { ...validRequest, target: 'C:/secret' }), false);
-  assert.equal(schemaAccepts(schema, { phase: 'execute', mode: 'plan', requestId: 'x' }), false);
-  assert.equal(schemaAccepts(schema, { phase: 'request', requestId: 'x' }), false);
   assert.equal(schemaAccepts(schema, { phase: 'execute', requestId: 7 }), false);
   assert.equal(acceptsStrictSchema(schema, validRequest), true);
 });

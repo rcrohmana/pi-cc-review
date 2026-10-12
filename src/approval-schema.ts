@@ -3,31 +3,18 @@ import type { ApprovalInput, ApprovalMode, ExecuteInput, RequestInput } from './
 
 export const approvalParametersSchema = {
   type: 'object',
-  oneOf: [
-    {
-      type: 'object',
-      properties: {
-        phase: { const: 'request', type: 'string' },
-        mode: { enum: ['auto', 'plan', 'spec', 'code', 'repo'], type: 'string' },
-        file: { type: 'string', minLength: 1, maxLength: 4_096 },
-        base: { type: 'string', minLength: 1, maxLength: 512 },
-        focus: { type: 'string', minLength: 1, maxLength: 2_000 },
-        deep: { type: 'boolean' },
-        raw: { type: 'boolean' },
-      },
-      required: ['phase'],
-      additionalProperties: false,
-    },
-    {
-      type: 'object',
-      properties: {
-        phase: { const: 'execute', type: 'string' },
-        requestId: { type: 'string', minLength: 1, maxLength: 128 },
-      },
-      required: ['phase', 'requestId'],
-      additionalProperties: false,
-    },
-  ],
+  properties: {
+    phase: { enum: ['request', 'execute'], type: 'string' },
+    mode: { enum: ['auto', 'plan', 'spec', 'code', 'repo'], type: 'string' },
+    file: { type: 'string', minLength: 1, maxLength: 4_096 },
+    base: { type: 'string', minLength: 1, maxLength: 512 },
+    focus: { type: 'string', minLength: 1, maxLength: 2_000 },
+    deep: { type: 'boolean' },
+    raw: { type: 'boolean' },
+    requestId: { type: 'string', minLength: 1, maxLength: 128 },
+  },
+  required: ['phase'],
+  additionalProperties: false,
 } as const;
 
 const modes = new Set<ApprovalMode>(['auto', 'plan', 'spec', 'code', 'repo']);
